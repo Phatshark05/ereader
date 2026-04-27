@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.3 — 2026-04-27
+
+### Changed
+- Temporarily render inline EPUB images as placeholders in the reader draw path while the SD-backed image pipeline is being reworked
+
+### Fixed
+- **Front-matter image reboot loop:** Books saved in early chapters that contain cover/title/front-matter images no longer invoke the fragile inline PNG/JPEG decode path during page draw
+- **Reader open stability:** Inline image sections now preserve pagination space without risking decoder stack or heap corruption on open/resume
+
 ## v0.4.2 — 2026-04-25
 
 ### Changed

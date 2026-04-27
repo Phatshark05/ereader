@@ -141,13 +141,12 @@ void ui_reader_draw(BookReader& reader, ReaderRefreshState& refresh) {
             if (inline_image_is_marker(line)) {
                 String imgPath; int imgW, imgH, imgLines;
                 if (inline_image_parse_enriched(line, imgPath, imgW, imgH, imgLines)) {
-                    debug_trace_mark("ui_reader_draw:inline_image", imgPath);
-                    int imgX = marginX + (W - marginX * 2 - imgW) / 2;
+                    debug_trace_mark("ui_reader_draw:inline_image_hotfix_placeholder", imgPath);
+                    int safeW = max(24, min(imgW, W - marginX * 2));
+                    int imgX = marginX + (W - marginX * 2 - safeW) / 2;
                     int imgY = y - fontAscender;
-                    if (!inline_image_render(imgPath, imgX, imgY, imgW, imgH)) {
-                        display_draw_rect(imgX, imgY, imgW, imgH, 10);
-                        display_draw_text(marginX, y, "[image]", 8);
-                    }
+                    display_draw_rect(imgX, imgY, safeW, lineH, 10);
+                    display_draw_text(marginX, y, "[image hidden for stability]", 8);
                 }
                 y += lineH;
             } else if (inline_image_is_continuation(line)) {
