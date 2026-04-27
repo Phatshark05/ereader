@@ -265,21 +265,77 @@ String BookReader::readLineFromCache(int lineIndex) {
 
 void BookReader::paginateLines() {
     _pages.clear();
-    // Simple fixed-size pagination — no SD reads needed.
-    // Image-aware page breaking would require reading every line from SD
-    // which is too slow (503 file operations). Images that span a page
-    // boundary will just be clipped, which is acceptable.
-    int i = 0;
-    while (i < _totalLines) {
+    if (_totalLines <= 0) {
+        _totalPages = 1;
+        return;
+    }
+
+    File f = SD.open(_lineCachePath, FILE_READ);
+    if (!f) {
+        Serial.printf("paginateLines: cannot open %s, falling back to fixed pagination\n",
+                      _lineCachePath.c_str());
+        int i = 0;
+        while (i < _totalLines) {
+            PageRange pr;
+            pr.lineStart = i;
+            pr.lineEnd = min(i + _linesPerPage, _totalLines);
+            _pages.push_back(pr);
+            i = pr.lineEnd;
+        }
+        _totalPages = _pages.size();
+        if (_totalPages == 0) _totalPages = 1;
+        return;
+    }
+
+    int pageStart = 0;
+    int usedLines = 0;
+    int lineIndex = 0;
+    unsigned long lastYieldMs = millis();
+
+    while (lineIndex < _totalLines) {
+        if (millis() - lastYieldMs >= 25) { yield(); lastYieldMs = millis(); }
+
+        String line;
+        if (lineIndex < (int)_lineOffsets.size()) {
+            f.seek(_lineOffsets[lineIndex]);
+            line = f.readStringUntil('\n');
+        }
+
+        int consumes = 1;
+        String imgPath;
+        int imgW = 0, imgH = 0, imgLines = 0;
+        bool isImage = inline_image_parse_enriched(line, imgPath, imgW, imgH, imgLines);
+        if (isImage) {
+            consumes = max(1, imgLines);
+        } else if (inline_image_is_continuation(line)) {
+            consumes = 1;
+        }
+
+        if (usedLines > 0 && usedLines + consumes > _linesPerPage) {
+            PageRange pr;
+            pr.lineStart = pageStart;
+            pr.lineEnd = lineIndex;
+            _pages.push_back(pr);
+            pageStart = lineIndex;
+            usedLines = 0;
+            continue;
+        }
+
+        usedLines += consumes;
+        lineIndex += isImage ? consumes : 1;
+    }
+
+    f.close();
+
+    if (pageStart < _totalLines) {
         PageRange pr;
-        pr.lineStart = i;
-        pr.lineEnd = min(i + _linesPerPage, _totalLines);
+        pr.lineStart = pageStart;
+        pr.lineEnd = _totalLines;
         _pages.push_back(pr);
-        i = pr.lineEnd;
     }
     _totalPages = _pages.size();
     if (_totalPages == 0) _totalPages = 1;
-    Serial.printf("Paginated: %d pages from %d lines (%d lines/page)\n",
+    Serial.printf("Paginated: %d pages from %d lines (%d lines/page, image-aware)\n",
                   _totalPages, _totalLines, _linesPerPage);
 }
 

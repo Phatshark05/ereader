@@ -141,16 +141,20 @@ void ui_reader_draw(BookReader& reader, ReaderRefreshState& refresh) {
             if (inline_image_is_marker(line)) {
                 String imgPath; int imgW, imgH, imgLines;
                 if (inline_image_parse_enriched(line, imgPath, imgW, imgH, imgLines)) {
-                    debug_trace_mark("ui_reader_draw:inline_image_hotfix_placeholder", imgPath);
-                    int safeW = max(24, min(imgW, W - marginX * 2));
+                    int safeW = max(1, min(imgW, W - marginX * 2));
+                    int safeH = max(1, min(imgH, bodyBottom - (y - fontAscender)));
                     int imgX = marginX + (W - marginX * 2 - safeW) / 2;
                     int imgY = y - fontAscender;
-                    display_draw_rect(imgX, imgY, safeW, lineH, 10);
-                    display_draw_text(marginX, y, "[image hidden for stability]", 8);
+                    debug_trace_mark("ui_reader_draw:inline_image_render", imgPath);
+                    if (!inline_image_render(imgPath, imgX, imgY, imgW, imgH)) {
+                        debug_trace_mark("ui_reader_draw:inline_image_render_failed", imgPath);
+                        display_draw_rect(imgX, imgY, safeW, min(safeH, lineH), 10);
+                        display_draw_text(marginX, y, "[image unavailable]", 8);
+                    }
                 }
-                y += lineH;
+                y += max(lineH, imgLines * lineH);
             } else if (inline_image_is_continuation(line)) {
-                // Image continuation placeholder — just advance Y
+                // Image continuation marker — space was consumed by the image
                 y += lineH;
             } else {
                 display_draw_text(marginX, y, line.c_str(), 0);
