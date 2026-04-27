@@ -10,61 +10,66 @@
 #include <algorithm>
 #include <cstdio>
 
-struct ImgDrawCtx {
+struct Raw4Ctx {
     int srcW = 0, srcH = 0;
-    int dstX = 0, dstY = 0;
     int dstW = 0, dstH = 0;
+    File* out = nullptr;
+    uint8_t* row = nullptr;
+    uint8_t* hits = nullptr;
     uint16_t* pngLineBuf = nullptr;
     uint32_t deadlineMs = 0;
     uint32_t lastYieldMs = 0;
     bool aborted = false;
 };
 
-static ImgDrawCtx* g_ictx = nullptr;
-static PNG* g_ipng_active = nullptr;
+static Raw4Ctx* g_raw4_ctx = nullptr;
+static PNG* g_png_active = nullptr;
 
 static bool inline_image_maybe_abort_decode() {
-    if (!g_ictx) return false;
+    if (!g_raw4_ctx) return false;
     uint32_t now = millis();
-    if (g_ictx->deadlineMs && (int32_t)(now - g_ictx->deadlineMs) >= 0) {
-        g_ictx->aborted = true;
+    if (g_raw4_ctx->deadlineMs && (int32_t)(now - g_raw4_ctx->deadlineMs) >= 0) {
+        g_raw4_ctx->aborted = true;
         return true;
     }
-    if (now - g_ictx->lastYieldMs >= 16) {
+    if (now - g_raw4_ctx->lastYieldMs >= 16) {
         yield();
-        g_ictx->lastYieldMs = now;
+        g_raw4_ctx->lastYieldMs = now;
     }
     return false;
 }
 
-static inline void plot_scaled(int sx, int sy, uint8_t gray4) {
-    if (!g_ictx || g_ictx->srcW <= 0 || g_ictx->srcH <= 0) return;
-    int dx = g_ictx->dstX + (sx * g_ictx->dstW) / g_ictx->srcW;
-    int dy = g_ictx->dstY + (sy * g_ictx->dstH) / g_ictx->srcH;
-    if (dx < 0 || dy < 0 || dx >= display_width() || dy >= display_height()) return;
-    display_draw_pixel(dx, dy, gray4);
+static void raw4_accumulate(int sx, int sy, uint8_t gray4) {
+    Raw4Ctx* ctx = g_raw4_ctx;
+    if (!ctx || !ctx->row || !ctx->hits || ctx->srcW <= 0 || ctx->srcH <= 0) return;
+    int dx = (sx * ctx->dstW) / ctx->srcW;
+    int dy = (sy * ctx->dstH) / ctx->srcH;
+    if (dx < 0 || dy < 0 || dx >= ctx->dstW || dy < 0 || dy >= ctx->dstH) return;
+    size_t idx = (size_t)dy * ctx->dstW + dx;
+    ctx->row[idx] = gray4 & 0x0F;
+    ctx->hits[idx] = 1;
 }
 
-static int ijpegDraw(JPEGDRAW* pDraw) {
-    if (!g_ictx || !pDraw) return 0;
+static int raw4JpegDraw(JPEGDRAW* pDraw) {
+    if (!g_raw4_ctx || !pDraw) return 0;
     for (int yy = 0; yy < pDraw->iHeight; yy++) {
         if (inline_image_maybe_abort_decode()) return 0;
         for (int xx = 0; xx < pDraw->iWidth; xx++) {
             uint16_t px = pDraw->pPixels[yy * pDraw->iWidth + xx];
-            plot_scaled(pDraw->x + xx, pDraw->y + yy, image_rgb565_to_gray4(px));
+            raw4_accumulate(pDraw->x + xx, pDraw->y + yy, image_rgb565_to_gray4(px));
         }
     }
     return 1;
 }
 
-static int ipngDraw(PNGDRAW* pDraw) {
-    if (!g_ictx || !pDraw || !g_ictx->pngLineBuf || !g_ipng_active) return 0;
+static int raw4PngDraw(PNGDRAW* pDraw) {
+    if (!g_raw4_ctx || !pDraw || !g_raw4_ctx->pngLineBuf || !g_png_active) return 0;
     if (inline_image_maybe_abort_decode()) return 0;
-    if (pDraw->iWidth <= 0 || pDraw->iWidth > 1024) return 0;
+    if (pDraw->iWidth <= 0 || pDraw->iWidth > g_raw4_ctx->srcW) return 0;
 
-    g_ipng_active->getLineAsRGB565(pDraw, g_ictx->pngLineBuf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+    g_png_active->getLineAsRGB565(pDraw, g_raw4_ctx->pngLineBuf, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
     for (int xx = 0; xx < pDraw->iWidth; xx++) {
-        plot_scaled(xx, pDraw->y, image_rgb565_to_gray4(g_ictx->pngLineBuf[xx]));
+        raw4_accumulate(xx, pDraw->y, image_rgb565_to_gray4(g_raw4_ctx->pngLineBuf[xx]));
     }
     return 1;
 }
@@ -117,12 +122,16 @@ static void* pngFileOpen(const char* path, int32_t* outSize) {
 
 static int32_t pngFileRead(PNGFILE* pFile, uint8_t* pBuf, int32_t len) {
     if (!pFile || !pFile->fHandle) return 0;
-    return (int32_t)((File*)pFile->fHandle)->read(pBuf, len);
+    int32_t n = (int32_t)((File*)pFile->fHandle)->read(pBuf, len);
+    if (n > 0) pFile->iPos += n;
+    return n > 0 ? n : 0;
 }
 
 static int32_t pngFileSeek(PNGFILE* pFile, int32_t position) {
-    if (!pFile || !pFile->fHandle) return 0;
-    return ((File*)pFile->fHandle)->seek(position) ? position : 0;
+    if (!pFile || !pFile->fHandle) return -1;
+    if (!((File*)pFile->fHandle)->seek(position)) return -1;
+    pFile->iPos = position;
+    return position;
 }
 
 static void pngFileClose(void* handle) {
@@ -354,6 +363,103 @@ static bool probe_image_file(const String& assetPath, int& imgW, int& imgH, size
     return ok;
 }
 
+static String raw4_cache_path_for(const String& assetPath, int w, int h) {
+    uint32_t hval = fnv1a_hash(assetPath, String(w) + "x" + String(h));
+    return inline_cache_dir() + "/raw4_" + String(hval, HEX) + "_" + String(w) + "x" + String(h) + ".r4";
+}
+
+static bool raw4_has_valid_size(const String& path, int w, int h) {
+    size_t sz = 0;
+    if (!file_has_content(path, &sz)) return false;
+    return sz == (size_t)w * (size_t)h;
+}
+
+static bool write_raw4_cache_from_image(const String& assetPath, const String& rawPath,
+                                        int srcW, int srcH, int dstW, int dstH,
+                                        size_t assetSize) {
+    if (!isSupportedImage(assetPath) || dstW <= 0 || dstH <= 0) return false;
+    if (!inline_image_asset_ok(assetSize, srcW, srcH, isPng(assetPath))) return false;
+    if ((uint64_t)dstW * (uint64_t)dstH > 540ULL * 960ULL) return false;
+    if (!ensure_inline_cache_dir()) return false;
+
+    String tmpPath = rawPath + ".tmp";
+    SD.remove(tmpPath);
+    File out = SD.open(tmpPath, FILE_WRITE);
+    if (!out) return false;
+
+    Raw4Ctx ctx;
+    ctx.srcW = srcW;
+    ctx.srcH = srcH;
+    ctx.dstW = dstW;
+    ctx.dstH = dstH;
+    ctx.out = &out;
+    ctx.deadlineMs = millis() + 2500;
+    ctx.lastYieldMs = millis();
+
+    size_t pixelCount = (size_t)dstW * (size_t)dstH;
+    ctx.row = (uint8_t*)ps_malloc(pixelCount);
+    ctx.hits = (uint8_t*)ps_calloc(pixelCount, 1);
+    if (!ctx.row || !ctx.hits) {
+        if (ctx.row) free(ctx.row);
+        if (ctx.hits) free(ctx.hits);
+        out.close();
+        SD.remove(tmpPath);
+        return false;
+    }
+    memset(ctx.row, 15, pixelCount);
+
+    bool ok = false;
+    if (isJpeg(assetPath)) {
+        debug_trace_mark("inline_image_raw4:jpeg", assetPath);
+        JPEGDEC* jpeg = new JPEGDEC();
+        if (jpeg && jpeg->open(assetPath.c_str(), jpegFileOpen, jpegFileClose, jpegFileRead, jpegFileSeek, raw4JpegDraw)) {
+            g_raw4_ctx = &ctx;
+            ok = jpeg->decode(0, 0, 0) == 1 && !ctx.aborted;
+            g_raw4_ctx = nullptr;
+            jpeg->close();
+        }
+        delete jpeg;
+    } else if (isPng(assetPath)) {
+        debug_trace_mark("inline_image_raw4:png", assetPath);
+        PNG* png = new PNG();
+        if (png && png->open(assetPath.c_str(), pngFileOpen, pngFileClose, pngFileRead, pngFileSeek, raw4PngDraw) == PNG_SUCCESS) {
+            ctx.pngLineBuf = (uint16_t*)ps_malloc((size_t)srcW * sizeof(uint16_t));
+            if (ctx.pngLineBuf) {
+                g_raw4_ctx = &ctx;
+                g_png_active = png;
+                ok = png->decode(nullptr, 0) == PNG_SUCCESS && !ctx.aborted;
+                g_png_active = nullptr;
+                g_raw4_ctx = nullptr;
+                free(ctx.pngLineBuf);
+                ctx.pngLineBuf = nullptr;
+            }
+            png->close();
+        }
+        delete png;
+    }
+
+    if (ok) {
+        size_t written = out.write(ctx.row, pixelCount);
+        ok = (written == pixelCount);
+    }
+
+    free(ctx.row);
+    free(ctx.hits);
+    out.close();
+
+    if (!ok) {
+        SD.remove(tmpPath);
+        return false;
+    }
+
+    SD.remove(rawPath);
+    if (!SD.rename(tmpPath, rawPath)) {
+        SD.remove(tmpPath);
+        return false;
+    }
+    return raw4_has_valid_size(rawPath, dstW, dstH);
+}
+
 bool inline_image_probe(EpubParser& parser, const String& bookPath, const String& zipPath,
                         int maxW, int maxH, InlineImageInfo& out) {
     debug_trace_mark("inline_image_probe:start", zipPath);
@@ -370,68 +476,68 @@ bool inline_image_probe(EpubParser& parser, const String& bookPath, const String
     if (!inline_image_asset_ok(assetSize, imgW, imgH, isPng(assetPath))) return false;
     if (imgW < 10 && imgH < 10) return false;
 
-    out.assetPath = assetPath;
     scaleToFit(imgW, imgH, maxW, maxH, out.displayW, out.displayH);
-    return out.displayW > 0 && out.displayH > 0;
-}
+    if (out.displayW <= 0 || out.displayH <= 0) return false;
 
-bool inline_image_render(const String& assetPath,
-                         int dstX, int dstY, int dstW, int dstH) {
-    debug_trace_mark("inline_image_render:start", assetPath);
-    if (!isSupportedImage(assetPath) || dstW <= 0 || dstH <= 0) return false;
-    if ((int)ESP.getFreeHeap() < 20000) return false;
-
-    size_t assetSize = 0;
-    if (!file_has_content(assetPath, &assetSize)) return false;
-
-    ImgDrawCtx ctx;
-    ctx.dstX = dstX;
-    ctx.dstY = dstY;
-    ctx.dstW = dstW;
-    ctx.dstH = dstH;
-    ctx.deadlineMs = millis() + 1500;
-    ctx.lastYieldMs = millis();
-    bool ok = false;
-
-    if (isJpeg(assetPath)) {
-        debug_trace_mark("inline_image_render:jpeg", assetPath);
-        JPEGDEC jpeg;
-        if (jpeg.open(assetPath.c_str(), jpegFileOpen, jpegFileClose, jpegFileRead, jpegFileSeek, ijpegDraw)) {
-            ctx.srcW = jpeg.getWidth();
-            ctx.srcH = jpeg.getHeight();
-            if (inline_image_asset_ok(assetSize, ctx.srcW, ctx.srcH, false)) {
-                g_ictx = &ctx;
-                ok = jpeg.decode(0, 0, 0) == 1;
-                g_ictx = nullptr;
-                if (ctx.aborted) debug_trace_mark("inline_image_render:jpeg_timeout", assetPath);
-            }
-            jpeg.close();
-        }
-    } else if (isPng(assetPath)) {
-        debug_trace_mark("inline_image_render:png", assetPath);
-        PNG png;
-        if (png.open(assetPath.c_str(), pngFileOpen, pngFileClose, pngFileRead, pngFileSeek, ipngDraw) == PNG_SUCCESS) {
-            ctx.srcW = png.getWidth();
-            ctx.srcH = png.getHeight();
-            if (inline_image_asset_ok(assetSize, ctx.srcW, ctx.srcH, true)) {
-                ctx.pngLineBuf = (uint16_t*)ps_malloc((size_t)ctx.srcW * sizeof(uint16_t));
-                if (ctx.pngLineBuf) {
-                    g_ictx = &ctx;
-                    g_ipng_active = &png;
-                    ok = png.decode(nullptr, 0) == PNG_SUCCESS;
-                    g_ipng_active = nullptr;
-                    g_ictx = nullptr;
-                    if (ctx.aborted) debug_trace_mark("inline_image_render:png_timeout", assetPath);
-                    free(ctx.pngLineBuf);
-                    ctx.pngLineBuf = nullptr;
-                } else {
-                    debug_trace_mark("inline_image_render:png_linebuf_alloc_failed", String(ctx.srcW));
-                }
-            }
-            png.close();
+    String rawPath = raw4_cache_path_for(assetPath, out.displayW, out.displayH);
+    if (!raw4_has_valid_size(rawPath, out.displayW, out.displayH)) {
+        debug_trace_mark("inline_image_probe:raw4_build", rawPath);
+        if (!write_raw4_cache_from_image(assetPath, rawPath, imgW, imgH,
+                                         out.displayW, out.displayH, assetSize)) {
+            debug_trace_mark("inline_image_probe:raw4_failed", assetPath);
+            return false;
         }
     }
 
+    out.assetPath = rawPath;
+    return true;
+}
+
+bool inline_image_render(const String& raw4Path,
+                         int dstX, int dstY, int dstW, int dstH) {
+    debug_trace_mark("inline_image_render:raw4", raw4Path);
+    if (dstW <= 0 || dstH <= 0) return false;
+    if (!raw4_has_valid_size(raw4Path, dstW, dstH)) return false;
+
+    File f = SD.open(raw4Path, FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        return false;
+    }
+
+    const int chunk = 64;
+    uint8_t buf[chunk];
+    int x = 0;
+    int y = 0;
+    uint32_t lastYieldMs = millis();
+    bool ok = true;
+
+    while (y < dstH) {
+        int remaining = dstW * dstH - (y * dstW + x);
+        int want = remaining > chunk ? chunk : remaining;
+        int n = f.read(buf, want);
+        if (n != want) { ok = false; break; }
+        for (int i = 0; i < n; i++) {
+            int px = dstX + x;
+            int py = dstY + y;
+            if (px >= 0 && py >= 0 && px < display_width() && py < display_height()) {
+                display_draw_pixel(px, py, buf[i] & 0x0F);
+            }
+            x++;
+            if (x >= dstW) {
+                x = 0;
+                y++;
+                if (y >= dstH) break;
+            }
+        }
+        uint32_t now = millis();
+        if (now - lastYieldMs >= 16) {
+            yield();
+            lastYieldMs = now;
+        }
+    }
+
+    f.close();
     debug_trace_mark("inline_image_render:done", ok ? "ok" : "fail");
     return ok;
 }
