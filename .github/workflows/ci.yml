@@ -14,10 +14,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         
-      - name: Setup PlatformIO
-        uses: arduino/setup-platformio@v1
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          version: latest
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Prepare config header for CI build
+        run: cp include/config.h.example include/config.h
           
       - name: Build
         run: pio run
