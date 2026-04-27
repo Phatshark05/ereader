@@ -119,22 +119,25 @@ bool ZipReader::fileExists(const char* name) {
     return false;
 }
 
+static bool zipSeekToData(FILE* f, const ZipEntry& entry) {
+    fseek(f, entry.local_header_offset, SEEK_SET);
+    uint8_t lfh[30];
+    if (fread(lfh, 1, 30, f) != 30) return false;
+    if (read32(lfh) != 0x04034b50) return false;
+
+    uint16_t nameLen  = read16(lfh + 26);
+    uint16_t extraLen = read16(lfh + 28);
+    long dataOffset = entry.local_header_offset + 30 + nameLen + extraLen;
+    return fseek(f, dataOffset, SEEK_SET) == 0;
+}
+
 uint8_t* ZipReader::readFile(const char* name, size_t* outSize) {
     *outSize = 0;
 
     for (const auto& entry : _entries) {
         if (entry.name != name) continue;
 
-        // Read local file header to find data offset
-        fseek(_f, entry.local_header_offset, SEEK_SET);
-        uint8_t lfh[30];
-        if (fread(lfh, 1, 30, _f) != 30) return nullptr;
-        if (read32(lfh) != 0x04034b50) return nullptr;
-
-        uint16_t nameLen  = read16(lfh + 26);
-        uint16_t extraLen = read16(lfh + 28);
-        long dataOffset = entry.local_header_offset + 30 + nameLen + extraLen;
-        fseek(_f, dataOffset, SEEK_SET);
+        if (!zipSeekToData(_f, entry)) return nullptr;
 
         if (entry.compression_method == 0) {
             // STORED — just read directly
@@ -180,6 +183,71 @@ uint8_t* ZipReader::readFile(const char* name, size_t* outSize) {
         break;
     }
     return nullptr;
+}
+
+bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* outSize) {
+    if (outSize) *outSize = 0;
+    if (!_f || !name || !outPath) return false;
+
+    for (const auto& entry : _entries) {
+        if (entry.name != name) continue;
+        if (!zipSeekToData(_f, entry)) return false;
+
+        FILE* out = fopen(outPath, "wb");
+        if (!out) return false;
+
+        bool ok = false;
+        if (entry.compression_method == 0) {
+            uint8_t buf[1024];
+            uint32_t remaining = entry.uncompressed_size;
+            ok = true;
+            while (remaining > 0) {
+                size_t want = remaining > sizeof(buf) ? sizeof(buf) : remaining;
+                size_t n = fread(buf, 1, want, _f);
+                if (n != want || fwrite(buf, 1, n, out) != n) { ok = false; break; }
+                remaining -= n;
+                yield();
+            }
+        } else if (entry.compression_method == 8) {
+            uint8_t inBuf[1024];
+            uint8_t outBuf[1024];
+            z_stream strm;
+            memset(&strm, 0, sizeof(strm));
+            ok = inflateInit2(&strm, -MAX_WBITS) == Z_OK;
+            uint32_t compressedRemaining = entry.compressed_size;
+
+            while (ok) {
+                if (strm.avail_in == 0 && compressedRemaining > 0) {
+                    size_t want = compressedRemaining > sizeof(inBuf) ? sizeof(inBuf) : compressedRemaining;
+                    size_t n = fread(inBuf, 1, want, _f);
+                    if (n != want) { ok = false; break; }
+                    compressedRemaining -= n;
+                    strm.next_in = inBuf;
+                    strm.avail_in = n;
+                }
+
+                strm.next_out = outBuf;
+                strm.avail_out = sizeof(outBuf);
+                int ret = inflate(&strm, compressedRemaining == 0 ? Z_FINISH : Z_NO_FLUSH);
+                size_t produced = sizeof(outBuf) - strm.avail_out;
+                if (produced && fwrite(outBuf, 1, produced, out) != produced) { ok = false; break; }
+                if (ret == Z_STREAM_END) break;
+                if (ret != Z_OK) { ok = false; break; }
+                yield();
+            }
+            inflateEnd(&strm);
+        }
+
+        long finalSize = ftell(out);
+        fclose(out);
+        if (!ok || finalSize < 0 || (uint32_t)finalSize != entry.uncompressed_size) {
+            remove(outPath);
+            return false;
+        }
+        if (outSize) *outSize = (size_t)finalSize;
+        return true;
+    }
+    return false;
 }
 
 
@@ -709,6 +777,10 @@ String EpubParser::getChapterHtml(int index) {
 
 uint8_t* EpubParser::readAsset(const String& zipPath, size_t* outSize) {
     return _zip.readFile(zipPath.c_str(), outSize);
+}
+
+bool EpubParser::extractAssetToFile(const String& zipPath, const String& outPath, size_t* outSize) {
+    return _zip.extractFileTo(zipPath.c_str(), outPath.c_str(), outSize);
 }
 
 String EpubParser::resolveChapterAssetPath(int chapterIndex, const String& relativePath) {

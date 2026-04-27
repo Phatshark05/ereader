@@ -14,8 +14,7 @@ struct Raw4Ctx {
     int srcW = 0, srcH = 0;
     int dstW = 0, dstH = 0;
     File* out = nullptr;
-    uint8_t* row = nullptr;
-    uint8_t* hits = nullptr;
+    uint8_t* pixels = nullptr;
     uint16_t* pngLineBuf = nullptr;
     uint32_t deadlineMs = 0;
     uint32_t lastYieldMs = 0;
@@ -41,13 +40,11 @@ static bool inline_image_maybe_abort_decode() {
 
 static void raw4_accumulate(int sx, int sy, uint8_t gray4) {
     Raw4Ctx* ctx = g_raw4_ctx;
-    if (!ctx || !ctx->row || !ctx->hits || ctx->srcW <= 0 || ctx->srcH <= 0) return;
+    if (!ctx || !ctx->pixels || ctx->srcW <= 0 || ctx->srcH <= 0) return;
     int dx = (sx * ctx->dstW) / ctx->srcW;
     int dy = (sy * ctx->dstH) / ctx->srcH;
     if (dx < 0 || dy < 0 || dx >= ctx->dstW || dy < 0 || dy >= ctx->dstH) return;
-    size_t idx = (size_t)dy * ctx->dstW + dx;
-    ctx->row[idx] = gray4 & 0x0F;
-    ctx->hits[idx] = 1;
+    ctx->pixels[(size_t)dy * ctx->dstW + dx] = gray4 & 0x0F;
 }
 
 static int raw4JpegDraw(JPEGDRAW* pDraw) {
@@ -291,32 +288,16 @@ static bool extract_asset_to_cache(EpubParser& parser, const String& bookPath,
     outPath = inline_cache_path_for(bookPath, zipPath);
     if (file_has_content(outPath, outSize)) return true;
 
-    size_t dataSize = 0;
-    uint8_t* data = parser.readAsset(zipPath, &dataSize);
-    if (!data || dataSize == 0) {
-        if (data) free(data);
-        return false;
-    }
-    if (dataSize > 8 * 1024 * 1024) {
-        free(data);
-        return false;
-    }
-
     String tmpPath = outPath + ".tmp";
     String tmpVfs = vfs_path(tmpPath);
     String finalVfs = vfs_path(outPath);
 
-    FILE* f = fopen(tmpVfs.c_str(), "wb");
-    if (!f) {
-        free(data);
+    size_t dataSize = 0;
+    if (!parser.extractAssetToFile(zipPath, tmpVfs, &dataSize) || dataSize == 0) {
+        remove(tmpVfs.c_str());
         return false;
     }
-
-    bool ok = fwrite(data, 1, dataSize, f) == dataSize;
-    fclose(f);
-    free(data);
-
-    if (!ok) {
+    if (dataSize > 8 * 1024 * 1024) {
         remove(tmpVfs.c_str());
         return false;
     }
@@ -397,16 +378,13 @@ static bool write_raw4_cache_from_image(const String& assetPath, const String& r
     ctx.lastYieldMs = millis();
 
     size_t pixelCount = (size_t)dstW * (size_t)dstH;
-    ctx.row = (uint8_t*)ps_malloc(pixelCount);
-    ctx.hits = (uint8_t*)ps_calloc(pixelCount, 1);
-    if (!ctx.row || !ctx.hits) {
-        if (ctx.row) free(ctx.row);
-        if (ctx.hits) free(ctx.hits);
+    ctx.pixels = (uint8_t*)ps_malloc(pixelCount);
+    if (!ctx.pixels) {
         out.close();
         SD.remove(tmpPath);
         return false;
     }
-    memset(ctx.row, 15, pixelCount);
+    memset(ctx.pixels, 15, pixelCount);
 
     bool ok = false;
     if (isJpeg(assetPath)) {
@@ -439,12 +417,11 @@ static bool write_raw4_cache_from_image(const String& assetPath, const String& r
     }
 
     if (ok) {
-        size_t written = out.write(ctx.row, pixelCount);
+        size_t written = out.write(ctx.pixels, pixelCount);
         ok = (written == pixelCount);
     }
 
-    free(ctx.row);
-    free(ctx.hits);
+    free(ctx.pixels);
     out.close();
 
     if (!ok) {

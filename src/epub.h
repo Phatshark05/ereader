@@ -17,6 +17,7 @@ public:
     bool open(const char* path);
     void close();
     uint8_t* readFile(const char* name, size_t* out_size);
+    bool extractFileTo(const char* name, const char* outPath, size_t* out_size);
     bool fileExists(const char* name);
 
 private:
@@ -63,6 +64,7 @@ public:
     String getCoverImagePath() const { return _coverImagePath; }
     bool hasCoverImage() const { return _coverImagePath.length() > 0; }
     uint8_t* readAsset(const String& zipPath, size_t* outSize);
+    bool extractAssetToFile(const String& zipPath, const String& outPath, size_t* outSize);
     String resolveChapterAssetPath(int chapterIndex, const String& relativePath);
 
     // Chapter title cache access for progress JSON persistence

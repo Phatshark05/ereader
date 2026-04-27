@@ -78,7 +78,10 @@ After a successful SD mount, the firmware now ensures the app folders below exis
 │   ├── .progress/
 │   │   └── <book>.json
 │   └── .linecache/
-│       └── ch<chapter>.txt
+│       ├── ch<chapter>.txt
+│       └── inline/
+│           ├── img_<hash>.<png|jpg|jpeg>
+│           └── raw4_<hash>_<w>x<h>.r4
 └── sleep/
     ├── *.png
     └── *.jpg
@@ -88,6 +91,7 @@ Notes:
 - `/books` is the main library folder.
 - `/books/.progress` stores reading position and last-read order.
 - `/books/.linecache` stores wrapped chapter text on SD to reduce RAM pressure.
+- `/books/.linecache/inline` stores extracted EPUB images and pre-rendered 4-bit grayscale image caches so reader page draw can stream from SD instead of decoding PNG/JPEG live.
 - `/sleep` is optional from a user perspective, but the firmware auto-creates it when the SD card mounts successfully.
 - If there are no valid images in `/sleep`, the device still sleeps normally and shows the built-in fallback screen.
 
