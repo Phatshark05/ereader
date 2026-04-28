@@ -8,6 +8,7 @@ struct ZipEntry {
     String name;
     uint32_t compressed_size;
     uint32_t uncompressed_size;
+    uint32_t crc_32;
     uint32_t local_header_offset;
     uint16_t compression_method;  // 0=STORED, 8=DEFLATE
 };
@@ -18,6 +19,8 @@ public:
     void close();
     uint8_t* readFile(const char* name, size_t* out_size);
     bool extractFileTo(const char* name, const char* outPath, size_t* out_size);
+    bool getFileSignature(const char* name, uint32_t& outCrc32, uint32_t& compressedSize,
+                          uint32_t& uncompressedSize, uint16_t& compressionMethod);
     bool fileExists(const char* name);
 
 private:
@@ -65,6 +68,7 @@ public:
     bool hasCoverImage() const { return _coverImagePath.length() > 0; }
     uint8_t* readAsset(const String& zipPath, size_t* outSize);
     bool extractAssetToFile(const String& zipPath, const String& outPath, size_t* outSize);
+    String getAssetSignature(const String& zipPath);
     String resolveChapterAssetPath(int chapterIndex, const String& relativePath);
 
     // Chapter title cache access for progress JSON persistence

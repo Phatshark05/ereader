@@ -261,8 +261,9 @@ static bool ensure_inline_cache_dir() {
     return SD.mkdir(dir);
 }
 
-static String inline_cache_path_for(const String& bookPath, const String& zipPath) {
-    uint32_t h = fnv1a_hash(bookPath, zipPath);
+static String inline_cache_path_for(const String& bookPath, const String& zipPath,
+                                    const String& assetSignature) {
+    uint32_t h = fnv1a_hash(bookPath + "|" + zipPath, assetSignature);
     return inline_cache_dir() + "/img_" + String(h, HEX) + image_extension(zipPath);
 }
 
@@ -285,29 +286,60 @@ static bool extract_asset_to_cache(EpubParser& parser, const String& bookPath,
     if (!isSupportedImage(zipPath)) return false;
     if (!ensure_inline_cache_dir()) return false;
 
-    outPath = inline_cache_path_for(bookPath, zipPath);
-    if (file_has_content(outPath, outSize)) return true;
+    String assetSignature = parser.getAssetSignature(zipPath);
+    if (assetSignature.length() == 0) {
+        debug_trace_mark("inline_image_extract:no_signature", zipPath);
+        return false;
+    }
+    outPath = inline_cache_path_for(bookPath, zipPath, assetSignature);
+    if (file_has_content(outPath, outSize)) {
+        debug_trace_mark("inline_image_extract:cache_hit", outPath);
+        return true;
+    }
 
     String tmpPath = outPath + ".tmp";
-    String tmpVfs = vfs_path(tmpPath);
-    String finalVfs = vfs_path(outPath);
 
     size_t dataSize = 0;
-    if (!parser.extractAssetToFile(zipPath, tmpVfs, &dataSize) || dataSize == 0) {
-        remove(tmpVfs.c_str());
+    uint8_t* data = parser.readAsset(zipPath, &dataSize);
+    if (!data || dataSize == 0) {
+        debug_trace_mark("inline_image_extract:read_failed", zipPath);
+        if (data) free(data);
+        SD.remove(tmpPath);
         return false;
     }
     if (dataSize > 8 * 1024 * 1024) {
-        remove(tmpVfs.c_str());
+        debug_trace_mark("inline_image_extract:too_large", String((uint32_t)dataSize));
+        free(data);
+        SD.remove(tmpPath);
         return false;
     }
 
-    remove(finalVfs.c_str());
-    if (rename(tmpVfs.c_str(), finalVfs.c_str()) != 0) {
-        remove(tmpVfs.c_str());
+    SD.remove(tmpPath);
+    File tmp = SD.open(tmpPath, FILE_WRITE);
+    if (!tmp || tmp.isDirectory()) {
+        debug_trace_mark("inline_image_extract:tmp_open_failed", tmpPath);
+        if (tmp) tmp.close();
+        free(data);
+        SD.remove(tmpPath);
+        return false;
+    }
+    size_t written = tmp.write(data, dataSize);
+    tmp.close();
+    free(data);
+    if (written != dataSize) {
+        debug_trace_mark("inline_image_extract:write_failed", String((uint32_t)written) + "/" + String((uint32_t)dataSize));
+        SD.remove(tmpPath);
         return false;
     }
 
+    SD.remove(outPath);
+    if (!SD.rename(tmpPath, outPath)) {
+        debug_trace_mark("inline_image_extract:rename_failed", outPath);
+        SD.remove(tmpPath);
+        return false;
+    }
+
+    debug_trace_mark("inline_image_extract:ok", outPath + ":" + String((uint32_t)dataSize));
     if (outSize) *outSize = dataSize;
     return true;
 }
@@ -316,13 +348,17 @@ static bool probe_image_file(const String& assetPath, int& imgW, int& imgH, size
     imgW = 0;
     imgH = 0;
     size_t assetSize = 0;
-    if (!file_has_content(assetPath, &assetSize)) return false;
+    if (!file_has_content(assetPath, &assetSize)) {
+        debug_trace_mark("inline_image_probe_file:no_asset", assetPath);
+        return false;
+    }
     if (outSize) *outSize = assetSize;
 
     if (isJpeg(assetPath)) {
         JPEGDEC* jpeg = new JPEGDEC();
         if (!jpeg) return false;
         bool ok = jpeg->open(assetPath.c_str(), jpegFileOpen, jpegFileClose, jpegFileRead, jpegFileSeek, noopJpegDraw);
+        if (!ok) debug_trace_mark("inline_image_probe_file:jpeg_open_failed", assetPath);
         if (ok) {
             imgW = jpeg->getWidth();
             imgH = jpeg->getHeight();
@@ -335,6 +371,7 @@ static bool probe_image_file(const String& assetPath, int& imgW, int& imgH, size
     PNG* png = new PNG();
     if (!png) return false;
     bool ok = png->open(assetPath.c_str(), pngFileOpen, pngFileClose, pngFileRead, pngFileSeek, noopPngDraw) == PNG_SUCCESS;
+    if (!ok) debug_trace_mark("inline_image_probe_file:png_open_failed", assetPath);
     if (ok) {
         imgW = png->getWidth();
         imgH = png->getHeight();
@@ -361,6 +398,16 @@ static bool write_raw4_cache_from_image(const String& assetPath, const String& r
     if (!isSupportedImage(assetPath) || dstW <= 0 || dstH <= 0) return false;
     if (!inline_image_asset_ok(assetSize, srcW, srcH, isPng(assetPath))) return false;
     if ((uint64_t)dstW * (uint64_t)dstH > 540ULL * 960ULL) return false;
+
+    // SAFETY: PNGdec + SD file callbacks are heap-corrupting on the ESP32-S3
+    // in this branch during raw4 generation. Do not attempt PNG pre-rendering
+    // on-device until that decoder path is fixed; JPEG inline images can still
+    // render, and PNGs degrade to the existing placeholder instead of rebooting.
+    if (isPng(assetPath)) {
+        debug_trace_mark("inline_image_raw4:png_disabled", assetPath);
+        return false;
+    }
+
     if (!ensure_inline_cache_dir()) return false;
 
     String tmpPath = rawPath + ".tmp";
@@ -392,9 +439,13 @@ static bool write_raw4_cache_from_image(const String& assetPath, const String& r
         JPEGDEC* jpeg = new JPEGDEC();
         if (jpeg && jpeg->open(assetPath.c_str(), jpegFileOpen, jpegFileClose, jpegFileRead, jpegFileSeek, raw4JpegDraw)) {
             g_raw4_ctx = &ctx;
-            ok = jpeg->decode(0, 0, 0) == 1 && !ctx.aborted;
+            int dec = jpeg->decode(0, 0, 0);
+            ok = dec == 1 && !ctx.aborted;
+            debug_trace_mark("inline_image_raw4:jpeg_decoded", String(dec) + ":" + String(ctx.aborted ? 1 : 0));
             g_raw4_ctx = nullptr;
             jpeg->close();
+        } else {
+            debug_trace_mark("inline_image_raw4:jpeg_open_failed", assetPath);
         }
         delete jpeg;
     } else if (isPng(assetPath)) {
@@ -419,22 +470,27 @@ static bool write_raw4_cache_from_image(const String& assetPath, const String& r
     if (ok) {
         size_t written = out.write(ctx.pixels, pixelCount);
         ok = (written == pixelCount);
+        debug_trace_mark("inline_image_raw4:write", String((uint32_t)written) + "/" + String((uint32_t)pixelCount));
     }
 
     free(ctx.pixels);
     out.close();
 
     if (!ok) {
+        debug_trace_mark("inline_image_raw4:not_ok", assetPath);
         SD.remove(tmpPath);
         return false;
     }
 
     SD.remove(rawPath);
     if (!SD.rename(tmpPath, rawPath)) {
+        debug_trace_mark("inline_image_raw4:rename_failed", rawPath);
         SD.remove(tmpPath);
         return false;
     }
-    return raw4_has_valid_size(rawPath, dstW, dstH);
+    bool valid = raw4_has_valid_size(rawPath, dstW, dstH);
+    debug_trace_mark("inline_image_raw4:valid", String(valid ? 1 : 0));
+    return valid;
 }
 
 bool inline_image_probe(EpubParser& parser, const String& bookPath, const String& zipPath,
@@ -444,10 +500,16 @@ bool inline_image_probe(EpubParser& parser, const String& bookPath, const String
 
     String assetPath;
     size_t assetSize = 0;
-    if (!extract_asset_to_cache(parser, bookPath, zipPath, assetPath, &assetSize)) return false;
+    if (!extract_asset_to_cache(parser, bookPath, zipPath, assetPath, &assetSize)) {
+        debug_trace_mark("inline_image_probe:extract_failed", zipPath);
+        return false;
+    }
 
     int imgW = 0, imgH = 0;
-    if (!probe_image_file(assetPath, imgW, imgH, &assetSize)) return false;
+    if (!probe_image_file(assetPath, imgW, imgH, &assetSize)) {
+        debug_trace_mark("inline_image_probe:probe_file_failed", assetPath);
+        return false;
+    }
 
     debug_trace_mark("inline_image_probe:decoded", String(imgW) + "x" + String(imgH));
     if (!inline_image_asset_ok(assetSize, imgW, imgH, isPng(assetPath))) return false;
@@ -474,10 +536,14 @@ bool inline_image_render(const String& raw4Path,
                          int dstX, int dstY, int dstW, int dstH) {
     debug_trace_mark("inline_image_render:raw4", raw4Path);
     if (dstW <= 0 || dstH <= 0) return false;
-    if (!raw4_has_valid_size(raw4Path, dstW, dstH)) return false;
+    if (!raw4_has_valid_size(raw4Path, dstW, dstH)) {
+        debug_trace_mark("inline_image_render:invalid_raw4", raw4Path);
+        return false;
+    }
 
     File f = SD.open(raw4Path, FILE_READ);
     if (!f || f.isDirectory()) {
+        debug_trace_mark("inline_image_render:open_failed", raw4Path);
         if (f) f.close();
         return false;
     }

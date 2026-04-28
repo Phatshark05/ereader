@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cerrno>
 #include <algorithm>
+#include <SD.h>
 
 // ═══════════════════════════════════════════════════════════════════
 // ZipReader — lightweight ZIP reader using ESP-IDF zlib
@@ -18,6 +19,8 @@ static uint16_t read16(const uint8_t* p) { return p[0] | (p[1] << 8); }
 static uint32_t read32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24); }
 static String decodeEntities(const String& input);
 static String stripTagsAndTrim(const String& html);
+static String urlDecodePathComponent(const String& input);
+static bool extractImageAttr(const String& tagContent, String& outSrc);
 
 bool ZipReader::open(const char* path) {
     close();
@@ -87,6 +90,7 @@ bool ZipReader::parseCentralDirectory() {
 
         ZipEntry entry;
         entry.compression_method = read16(cd + pos + 10);
+        entry.crc_32             = read32(cd + pos + 16);
         entry.compressed_size    = read32(cd + pos + 20);
         entry.uncompressed_size  = read32(cd + pos + 24);
         entry.local_header_offset = read32(cd + pos + 42);
@@ -115,6 +119,19 @@ bool ZipReader::parseCentralDirectory() {
 bool ZipReader::fileExists(const char* name) {
     for (const auto& e : _entries) {
         if (e.name == name) return true;
+    }
+    return false;
+}
+
+bool ZipReader::getFileSignature(const char* name, uint32_t& outCrc32, uint32_t& compressedSize,
+                                 uint32_t& uncompressedSize, uint16_t& compressionMethod) {
+    for (const auto& e : _entries) {
+        if (e.name != name) continue;
+        outCrc32 = e.crc_32;
+        compressedSize = e.compressed_size;
+        uncompressedSize = e.uncompressed_size;
+        compressionMethod = e.compression_method;
+        return true;
     }
     return false;
 }
@@ -193,8 +210,11 @@ bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* out
         if (entry.name != name) continue;
         if (!zipSeekToData(_f, entry)) return false;
 
-        FILE* out = fopen(outPath, "wb");
-        if (!out) return false;
+        File out = SD.open(outPath, FILE_WRITE);
+        if (!out || out.isDirectory()) {
+            if (out) out.close();
+            return false;
+        }
 
         bool ok = false;
         if (entry.compression_method == 0) {
@@ -204,7 +224,7 @@ bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* out
             while (remaining > 0) {
                 size_t want = remaining > sizeof(buf) ? sizeof(buf) : remaining;
                 size_t n = fread(buf, 1, want, _f);
-                if (n != want || fwrite(buf, 1, n, out) != n) { ok = false; break; }
+                if (n != want || out.write(buf, n) != n) { ok = false; break; }
                 remaining -= n;
                 yield();
             }
@@ -230,7 +250,7 @@ bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* out
                 strm.avail_out = sizeof(outBuf);
                 int ret = inflate(&strm, compressedRemaining == 0 ? Z_FINISH : Z_NO_FLUSH);
                 size_t produced = sizeof(outBuf) - strm.avail_out;
-                if (produced && fwrite(outBuf, 1, produced, out) != produced) { ok = false; break; }
+                if (produced && out.write(outBuf, produced) != produced) { ok = false; break; }
                 if (ret == Z_STREAM_END) break;
                 if (ret != Z_OK) { ok = false; break; }
                 yield();
@@ -238,13 +258,13 @@ bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* out
             inflateEnd(&strm);
         }
 
-        long finalSize = ftell(out);
-        fclose(out);
-        if (!ok || finalSize < 0 || (uint32_t)finalSize != entry.uncompressed_size) {
-            remove(outPath);
+        size_t finalSize = out.size();
+        out.close();
+        if (!ok || finalSize != entry.uncompressed_size) {
+            SD.remove(outPath);
             return false;
         }
-        if (outSize) *outSize = (size_t)finalSize;
+        if (outSize) *outSize = finalSize;
         return true;
     }
     return false;
@@ -783,6 +803,14 @@ bool EpubParser::extractAssetToFile(const String& zipPath, const String& outPath
     return _zip.extractFileTo(zipPath.c_str(), outPath.c_str(), outSize);
 }
 
+String EpubParser::getAssetSignature(const String& zipPath) {
+    uint32_t crc32 = 0, compressedSize = 0, uncompressedSize = 0;
+    uint16_t compressionMethod = 0;
+    if (!_zip.getFileSignature(zipPath.c_str(), crc32, compressedSize, uncompressedSize, compressionMethod)) return "";
+    return String(crc32, HEX) + ":" + String(compressedSize, HEX) + ":" +
+           String(uncompressedSize, HEX) + ":" + String(compressionMethod, HEX);
+}
+
 String EpubParser::resolveChapterAssetPath(int chapterIndex, const String& relativePath) {
     if (chapterIndex < 0 || chapterIndex >= (int)_spine.size()) return relativePath;
     String chapterPath = _spine[chapterIndex].href;
@@ -942,6 +970,87 @@ static String decodeNumericEntity(const String& entity) {
     return String(buf);
 }
 
+static int hexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+    return -1;
+}
+
+static String urlDecodePathComponent(const String& input) {
+    String out;
+    out.reserve(input.length());
+    for (int i = 0; i < (int)input.length(); i++) {
+        char c = input[i];
+        if (c == '%' && i + 2 < (int)input.length()) {
+            int hi = hexValue(input[i + 1]);
+            int lo = hexValue(input[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += (char)((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
+static bool isAttrNameChar(char c) {
+    return isalnum((unsigned char)c) || c == '_' || c == '-' || c == ':';
+}
+
+static bool extractImageAttr(const String& tagContent, String& outSrc) {
+    outSrc = "";
+    int i = 0;
+    int len = tagContent.length();
+    while (i < len) {
+        while (i < len && !isAttrNameChar(tagContent[i])) i++;
+        int nameStart = i;
+        while (i < len && isAttrNameChar(tagContent[i])) i++;
+        if (i <= nameStart) break;
+
+        String name = tagContent.substring(nameStart, i);
+        name.toLowerCase();
+        while (i < len && isspace((unsigned char)tagContent[i])) i++;
+
+        String value;
+        if (i < len && tagContent[i] == '=') {
+            i++;
+            while (i < len && isspace((unsigned char)tagContent[i])) i++;
+            if (i < len && (tagContent[i] == '"' || tagContent[i] == '\'')) {
+                char quote = tagContent[i++];
+                int valueStart = i;
+                while (i < len && tagContent[i] != quote) i++;
+                value = tagContent.substring(valueStart, i);
+                if (i < len && tagContent[i] == quote) i++;
+            } else {
+                int valueStart = i;
+                while (i < len && !isspace((unsigned char)tagContent[i]) && tagContent[i] != '>') i++;
+                value = tagContent.substring(valueStart, i);
+            }
+        }
+
+        if (name == "src" || name == "href" || name == "xlink:href") {
+            int hash = value.indexOf('#');
+            int query = value.indexOf('?');
+            int cut = -1;
+            if (hash >= 0 && query >= 0) cut = min(hash, query);
+            else if (hash >= 0) cut = hash;
+            else if (query >= 0) cut = query;
+            if (cut >= 0) value = value.substring(0, cut);
+            value = decodeEntities(value);
+            value = urlDecodePathComponent(value);
+            value.trim();
+            if (value.length() > 0) {
+                outSrc = value;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Decode all HTML entities in a string (named + numeric)
 static String decodeEntities(const String& input) {
     String result;
@@ -1046,19 +1155,7 @@ String EpubParser::stripHtml(const char* html, size_t len) {
                 // Extract src="..." from buffered tag content
                 // Scan raw HTML from tag start to find src= or href= attribute
                 String src;
-                const char* attrs = tagContent.c_str();
-                const char* srcAttr = strstr(attrs, "src=");
-                if (!srcAttr) srcAttr = strstr(attrs, "href=");
-                if (srcAttr) {
-                    srcAttr += (srcAttr[0] == 's') ? 4 : 5; // skip "src=" or "href="
-                    if (*srcAttr == '"' || *srcAttr == '\'') {
-                        char q = *srcAttr++;
-                        const char* end = strchr(srcAttr, q);
-                        if (end && end > srcAttr) {
-                            src = String(srcAttr, end - srcAttr);
-                        }
-                    }
-                }
+                extractImageAttr(tagContent, src);
                 if (src.length() > 0) {
                     if (result.length() > 0 && result[result.length()-1] != '\n')
                         result += '\n';

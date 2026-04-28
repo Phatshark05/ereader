@@ -12,7 +12,7 @@ class EpubParser;
 #define IMG_CONT_MARKER  "\x01IMGCONT\x01"
 
 struct InlineImageInfo {
-    String assetPath;     // extracted cached image path on SD
+    String assetPath;     // pre-rendered raw4 cache path on SD
     int    displayW = 0;  // scaled width for display (pixels)
     int    displayH = 0;  // scaled height for display (pixels)
     int    linesConsumed = 0; // how many text-line slots this image occupies
@@ -36,14 +36,15 @@ bool inline_image_parse_raw(const String& line, String& outPath);
 // Build an enriched marker string for storage in wrappedLines.
 String inline_image_build_marker(const String& assetPath, int w, int h, int lines);
 
-// Extract an EPUB image to SD cache if needed, then probe dimensions without
-// fully decoding it. Fills displayW/displayH scaled to fit within maxW x maxH
-// (aspect-ratio preserved). Returns false if the asset is missing,
-// unsupported, or corrupt.
+// Extract an EPUB image to SD cache if needed, probe dimensions, and pre-render
+// it into an SD-backed raw4 cache file. Fills displayW/displayH scaled to fit
+// within maxW x maxH (aspect-ratio preserved). Returns false if the asset is
+// missing, unsupported, corrupt, or too large for the safe decode/cache limits.
 bool inline_image_probe(EpubParser& parser, const String& bookPath, const String& zipPath,
                         int maxW, int maxH, InlineImageInfo& out);
 
-// Render an extracted cached image file to the portrait framebuffer.
-// Decodes via JPEGDEC/PNGdec file callbacks directly into the display buffer.
-bool inline_image_render(const String& assetPath,
+// Render a pre-rendered raw4 cache file to the portrait framebuffer.
+// The raw4 file stores one 4-bit grayscale pixel value per byte, intentionally
+// trading SD space for a simple streaming draw path with no PNG/JPEG decode.
+bool inline_image_render(const String& raw4Path,
                          int dstX, int dstY, int dstW, int dstH);

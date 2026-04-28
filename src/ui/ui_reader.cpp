@@ -135,12 +135,15 @@ void ui_reader_draw(BookReader& reader, ReaderRefreshState& refresh) {
     if (lines.empty()) {
         display_draw_text(marginX, y, "[Page content unavailable]", 6);
     } else {
-        for (const auto& line : lines) {
+        for (size_t i = 0; i < lines.size(); i++) {
+            const auto& line = lines[i];
             if (y > bodyBottom) break;
 
             if (inline_image_is_marker(line)) {
-                String imgPath; int imgW, imgH, imgLines;
+                String imgPath;
+                int imgW = 0, imgH = 0, imgLines = 1;
                 if (inline_image_parse_enriched(line, imgPath, imgW, imgH, imgLines)) {
+                    imgLines = max(1, imgLines);
                     int safeW = max(1, min(imgW, W - marginX * 2));
                     int safeH = max(1, min(imgH, bodyBottom - (y - fontAscender)));
                     int imgX = marginX + (W - marginX * 2 - safeW) / 2;
@@ -151,10 +154,16 @@ void ui_reader_draw(BookReader& reader, ReaderRefreshState& refresh) {
                         display_draw_rect(imgX, imgY, safeW, min(safeH, lineH), 10);
                         display_draw_text(marginX, y, "[image unavailable]", 8);
                     }
+                    y += max(lineH, imgLines * lineH);
+                    while (i + 1 < lines.size() && inline_image_is_continuation(lines[i + 1])) i++;
+                } else {
+                    display_draw_text(marginX, y, "[image unavailable]", 8);
+                    y += lineH;
                 }
-                y += max(lineH, imgLines * lineH);
             } else if (inline_image_is_continuation(line)) {
-                // Image continuation marker — space was consumed by the image
+                // Continuation markers reserve wrapped image height and are
+                // skipped after the image marker renders. If one is stranded,
+                // advance one line so malformed caches remain navigable.
                 y += lineH;
             } else {
                 display_draw_text(marginX, y, line.c_str(), 0);

@@ -8,7 +8,7 @@ EPUB reader firmware for the LilyGo T5 4.7 inch ESP32-S3 e-paper board.
 
 ## Status
 
-Current firmware version: **v0.4.3**
+Current firmware version: **v0.4.4**
 
 This branch is tuned for the real device workflow now in code:
 - portrait UI on the 960x540 panel
@@ -36,13 +36,8 @@ This branch is tuned for the real device workflow now in code:
 - Five font size levels: XS, S, M, M-L, L
 - Serif (Noto Serif) and sans-serif (Fira Sans) font toggle — configurable in Settings
 - Line spacing options: Compact, Normal, Relaxed, Spacious, Extra
-- Inline image placeholders from EPUB content
+- Inline EPUB JPEG/JPG images rendered through an SD-backed pre-rendered cache, avoiding live image decode during page draw
 - Fast partial refresh for most page turns with stronger cleanup refreshes on cadence
-
-Current inline image note for **v0.4.3**:
-- Inline EPUB image decoding is temporarily disabled in the reader draw path for stability
-- Image markers render as placeholders so books with front-matter images can still open
-- A proper SD-backed pre-rendered image cache is planned to restore inline images safely
 - Reader progress bar, chapter indicator, page indicator, and optional battery display
 - Bookmarks
 
@@ -91,7 +86,7 @@ Notes:
 - `/books` is the main library folder.
 - `/books/.progress` stores reading position and last-read order.
 - `/books/.linecache` stores wrapped chapter text on SD to reduce RAM pressure.
-- `/books/.linecache/inline` stores extracted EPUB images and pre-rendered 4-bit grayscale image caches so reader page draw can stream from SD instead of decoding PNG/JPEG live.
+- `/books/.linecache/inline` stores extracted EPUB images and pre-rendered raw4 image caches. Raw4 stores one 4-bit grayscale value per byte, intentionally not packed nibbles, so reader page draw can stream from SD instead of decoding PNG/JPEG live.
 - `/sleep` is optional from a user perspective, but the firmware auto-creates it when the SD card mounts successfully.
 - If there are no valid images in `/sleep`, the device still sleeps normally and shows the built-in fallback screen.
 
@@ -182,15 +177,14 @@ Practical guidance:
 
 ## Inline EPUB image status
 
-Supported inline EPUB image behavior in **v0.4.2**:
+Supported inline EPUB image behavior in **v0.4.4**:
 - `.jpg`
 - `.jpeg`
-- `.png`
 
 Current behavior:
-- Inline JPEG and PNG images render on-device through the file-backed image path.
-- The renderer now uses safer asset guards and PNG line buffering sized to the decoded image width.
-- The earlier real-device PNG reset issue was fixed before this release.
+- Inline JPEG/JPG images render on-device through an SD-backed extracted-asset and raw4 pre-render cache.
+- Reader page draw streams pre-rendered raw4 image files from SD instead of live-decoding JPEGs during refresh.
+- Inline PNG images are intentionally skipped in this release because the current PNG raw4 generation path can corrupt heap/reboot on ESP32-S3 hardware. PNG rendering will be fixed in a later release.
 
 ## OTA updates
 

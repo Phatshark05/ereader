@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.4.4 — 2026-04-27
+
+### Added
+- Restored inline EPUB JPEG/JPG image rendering through an SD-backed extracted-asset and raw4 pre-render cache.
+- Added host-side regression checks for image marker pagination and EPUB image attribute parsing.
+
+### Changed
+- Inline image cache keys now include ZIP asset signatures so changed EPUB assets do not reuse stale rendered cache files.
+- Inline image extraction now uses the working in-memory ZIP asset read path followed by SD writes, avoiding ESP32 VFS create-permission failures seen with direct ZIP-to-file extraction.
+
+### Fixed
+- Reader draw now streams pre-rendered raw4 image data from SD instead of live-decoding images during page refresh.
+- Fixed image continuation marker handling so image spacer lines are not double-counted during draw.
+- Improved EPUB image attribute parsing to avoid false matches such as `srcset`, `data-srcset`, or text containing `src`.
+
+### Known limitations
+- Inline EPUB PNG images are intentionally not rendered in this build. PNG assets are detected but skipped because the current PNG raw4 generation path can corrupt heap/reboot on ESP32-S3 hardware. PNG support will be revisited in a later release.
+
 ## v0.4.3 — 2026-04-27
 
 ### Changed
