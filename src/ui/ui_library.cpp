@@ -21,6 +21,30 @@ static const char* librarySortNames[] = {"Title", "Author", "Recent", "Size"};
 
 extern BookReader reader;
 
+static String cleanMetadataText(String text) {
+    text.trim();
+    String normalized = text;
+    normalized.toLowerCase();
+    if (normalized == "null" || normalized == "(null)" || normalized == "undefined" ||
+        normalized == "unknown" || normalized == "n/a" || normalized == "none") {
+        return "";
+    }
+    return text;
+}
+
+static int bookProgressPercent(const BookInfo& book) {
+    if (!book.hasProgress || book.totalChapters <= 0) return -1;
+
+    int chapter = book.progressChapter;
+    if (chapter < 0) chapter = 0;
+    if (chapter >= book.totalChapters) chapter = book.totalChapters - 1;
+
+    int pct = (chapter * 100) / max(1, book.totalChapters);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
 static void wrapPosterTitle(const String& title, int maxWidth, int maxLines, std::vector<String>& lines) {
     lines.clear();
     String remaining = title;
@@ -328,39 +352,53 @@ void ui_library_draw(
             y += bannerH + MARGIN_Y + 16;  // Extra padding before book list
         }
 
-        int maxVis = (H - y - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H;
+        int maxVis = max(1, (H - y - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H);
+        const int rowX = MARGIN_X;
+        const int rowW = W - MARGIN_X * 2;
+        const int titleBaselineY = 34;
+        const int metaBaselineY = 82;
+        const int progressBoxW = 72;
 
         for (int vi = scroll; vi < numVisible && vi < scroll + maxVis; vi++) {
             int bi = visibleIdx[vi];
             const BookInfo& book = books[bi];
             int itemY = y + (vi - scroll) * BOOK_ITEM_H;
 
-            display_draw_filled_rect(MARGIN_X, itemY, W - MARGIN_X * 2, BOOK_ITEM_H - 4, 15);
-            display_draw_rect(MARGIN_X, itemY, W - MARGIN_X * 2, BOOK_ITEM_H - 4, 8);
+            if (vi > scroll) {
+                display_draw_hline(rowX, itemY - 6, rowW, 12);
+            }
+
+            int pct = bookProgressPercent(book);
+            int titleMaxW = rowW - 24;
+            if (pct >= 0) titleMaxW -= progressBoxW;
 
             String title = book.title;
-            if (display_text_width(title.c_str()) > W - MARGIN_X * 2 - 80) {
-                while (title.length() > 3 && display_text_width(title.c_str()) > W - MARGIN_X * 2 - 80) {
-                    title = title.substring(0, title.length() - 4) + "...";
-                }
+            title.trim();
+            if (title.length() == 0) title = book.filepath;
+            while (title.length() > 3 && display_text_width(title.c_str()) > titleMaxW) {
+                title = title.substring(0, title.length() - 4) + "...";
             }
-            display_draw_text(MARGIN_X + 8, itemY + 12, title.c_str(), 0);
+            display_draw_text(rowX + 10, itemY + titleBaselineY, title.c_str(), 0);
 
-            if (book.hasProgress && book.totalChapters > 0) {
-                int pct = (book.progressChapter * 100) / max(1, book.totalChapters);
-                if (pct > 100) pct = 100;
+            if (pct >= 0) {
                 char pctStr[10];
                 snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
                 int pw = display_text_width(pctStr);
-                display_draw_text(W - MARGIN_X - pw - 8, itemY + 12, pctStr, 4);
+                display_draw_text(rowX + rowW - pw - 10, itemY + titleBaselineY, pctStr, 4);
             }
 
-            String info = book.author;
-            if (info.length() == 0 && book.totalChapters > 0) info = String(book.totalChapters) + " chapters";
-            while (info.length() > 3 && display_text_width(info.c_str()) > W - MARGIN_X * 2 - 20) {
+            String info = cleanMetadataText(book.author);
+            if (info.length() == 0 && book.totalChapters > 0) {
+                info = String(book.totalChapters) + (book.totalChapters == 1 ? " chapter" : " chapters");
+            }
+            if (info.length() == 0 && book.fileSize > 0) {
+                info = String((int)((book.fileSize + 1023) / 1024)) + " KB";
+            }
+            int metaMaxW = rowW - 20;
+            while (info.length() > 3 && display_text_width(info.c_str()) > metaMaxW) {
                 info = info.substring(0, info.length() - 4) + "...";
             }
-            if (info.length() > 0) display_draw_text(MARGIN_X + 8, itemY + FONT_H + 8, info.c_str(), 8);
+            if (info.length() > 0) display_draw_text(rowX + 10, itemY + metaBaselineY, info.c_str(), 8);
         }
 
         int contentBottom = y + min(numVisible - scroll, maxVis) * BOOK_ITEM_H;

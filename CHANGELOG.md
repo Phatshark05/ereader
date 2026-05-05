@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.5 — 2026-05-05
+
+### Changed
+- Library list rows now use subtle separators for better readability without the previous strike-through effect.
+- WiFi upload now connects asynchronously, shows connection/error states, and avoids blocking the UI while joining the network.
+- Settings footer polish: Reset Defaults sits lower in the available whitespace and the firmware version has its own line.
+
+### Fixed
+- Restored right-aligned library progress percentages beside book titles, including saved 0% progress entries.
+- Sanitized null-like author metadata in library rows.
+
 ## v0.4.4 — 2026-04-27
 
 ### Added

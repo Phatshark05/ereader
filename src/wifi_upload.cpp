@@ -12,6 +12,13 @@ static bool _running = false;
 static File _uploadFile;
 static BookReader* _reader = nullptr;
 
+// Connection state tracking
+static bool _connecting = false;
+static bool _error = false;
+static String _errorMsg;
+static unsigned long _connectStart = 0;
+static const unsigned long CONNECT_TIMEOUT_MS = 15000;
+
 void wifi_upload_set_reader(BookReader* reader) { _reader = reader; }
 
 static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
@@ -321,58 +328,95 @@ static void handleSearch() {
 void wifi_upload_init() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    _connecting = false;
+    _error = false;
+    _errorMsg = "";
 }
 
 void wifi_upload_start() {
-    if (_running) return;
+    if (_running || _connecting) return;
 
     const Settings& s = settings_get();
-    Serial.printf("Connecting to WiFi: %s\n", s.wifiSSID.c_str());
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(s.wifiSSID.c_str(), s.wifiPass.c_str());
-
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-        delay(250);
-        Serial.print(".");
-    }
-    Serial.println();
-
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi connection failed");
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
+    if (s.wifiSSID.length() == 0) {
+        _error = true;
+        _errorMsg = "No WiFi configured";
+        Serial.println("WiFi: No SSID configured");
         return;
     }
 
-    Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("WiFi: Starting connection to %s\n", s.wifiSSID.c_str());
 
-    _server.on("/", HTTP_GET, handleRoot);
-    _server.on("/upload", HTTP_POST, handleUploadComplete, handleUploadData);
-    _server.on("/list", HTTP_GET, handleList);
-    _server.on("/settings", HTTP_POST, handleSettings);
-    _server.on("/delete", HTTP_POST, handleDelete);
-    _server.on("/search", HTTP_GET, handleSearch);
-    _server.begin();
-    _running = true;
+    _connecting = true;
+    _error = false;
+    _errorMsg = "";
+    _connectStart = millis();
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(s.wifiSSID.c_str(), s.wifiPass.c_str());
 }
 
 void wifi_upload_stop() {
-    if (!_running) return;
+    if (!_running && !_connecting) return;
     _server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     _running = false;
+    _connecting = false;
+    _error = false;
+    _errorMsg = "";
 }
 
 void wifi_upload_handle() {
     if (_running) {
         _server.handleClient();
+        return;
+    }
+
+    // Handle connection attempt without blocking the UI draw loop.
+    if (_connecting) {
+        wl_status_t status = WiFi.status();
+
+        if (status == WL_CONNECTED) {
+            Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+
+            _server.on("/", HTTP_GET, handleRoot);
+            _server.on("/upload", HTTP_POST, handleUploadComplete, handleUploadData);
+            _server.on("/list", HTTP_GET, handleList);
+            _server.on("/settings", HTTP_POST, handleSettings);
+            _server.on("/delete", HTTP_POST, handleDelete);
+            _server.on("/search", HTTP_GET, handleSearch);
+            _server.begin();
+
+            _running = true;
+            _connecting = false;
+            _error = false;
+            _errorMsg = "";
+        } else if (millis() - _connectStart >= CONNECT_TIMEOUT_MS) {
+            Serial.println("WiFi connection failed: timeout");
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+
+            _error = true;
+            _errorMsg = "Connection failed";
+            _connecting = false;
+        }
     }
 }
 
 bool wifi_upload_running() {
     return _running;
+}
+
+bool wifi_upload_connecting() {
+    return _connecting;
+}
+
+bool wifi_upload_has_error() {
+    return _error;
+}
+
+const char* wifi_upload_get_error() {
+    return _errorMsg.c_str();
 }
 
 String wifi_upload_ip() {

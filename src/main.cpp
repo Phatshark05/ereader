@@ -821,6 +821,24 @@ static void buttonPageBackward() {
 void loop() {
     if (appState == STATE_WIFI) {
         wifi_upload_handle();
+
+        // Periodic redraw during connection phase for animation.
+        static unsigned long lastWifiRedraw = 0;
+        if (wifi_upload_connecting() && millis() - lastWifiRedraw >= 500) {
+            needsRedraw = true;
+            lastWifiRedraw = millis();
+        }
+
+        // Also redraw once on error state transition.
+        static bool shownWifiError = false;
+        if (wifi_upload_has_error()) {
+            if (!shownWifiError) {
+                needsRedraw = true;
+                shownWifiError = true;
+            }
+        } else {
+            shownWifiError = false;
+        }
     }
 
     // Poll top button (GPIO 21): single=next page, double=prev page, hold=sleep — active LOW

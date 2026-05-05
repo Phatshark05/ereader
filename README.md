@@ -8,7 +8,7 @@ EPUB reader firmware for the LilyGo T5 4.7 inch ESP32-S3 e-paper board.
 
 ## Status
 
-Current firmware version: **v0.4.4**
+Current firmware version: **v0.4.5**
 
 This branch is tuned for the real device workflow now in code:
 - portrait UI on the 960x540 panel

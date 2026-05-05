@@ -11,3 +11,8 @@ void wifi_upload_handle();
 bool wifi_upload_running();
 String wifi_upload_ip();
 void wifi_upload_set_reader(BookReader* reader);  // enable book search
+
+// Connection state tracking
+bool wifi_upload_connecting();
+bool wifi_upload_has_error();
+const char* wifi_upload_get_error();

@@ -16,7 +16,6 @@ static const int H = PORTRAIT_H;
 static const int FONT_H = 50;
 static const int SETTINGS_ROW_H = FONT_H + 8;
 static const int SETTINGS_NAV_GAP_Y = 50;
-static const int SETTINGS_RESET_Y_OFFSET = 180;
 static int settingsPage = 0; // 0 = Reading, 1 = Device
 
 // ─── Settings option arrays ─────────────────────────────────────────
@@ -222,9 +221,8 @@ void ui_settings_draw(bool& settingsFromLibrary) {
             display_draw_text(W - MARGIN_X - rtw, navY + FONT_H - 4, rightLabel, 3);
         }
 
-        int versionY = navY + 90;
-        int resetY = navY + SETTINGS_RESET_Y_OFFSET;
-        if (resetY + FONT_H < footerTop - 20) {
+        int resetY = footerTop - (FONT_H * 2) - 24;
+        if (resetY > navY + FONT_H + 20) {
             const char* resetLabel = "[ Reset Defaults ]";
             display_draw_text(MARGIN_X, resetY, resetLabel, 3);
 
@@ -235,7 +233,7 @@ void ui_settings_draw(bool& settingsFromLibrary) {
                 snprintf(verLabel, sizeof(verLabel), "Firmware: v%s", FIRMWARE_VERSION);
             }
             int vw = display_text_width(verLabel);
-            display_draw_text(W - MARGIN_X - vw, versionY, verLabel, 8);
+            display_draw_text(W - MARGIN_X - vw, resetY + FONT_H + 4, verLabel, 8);
         }
     }
 
@@ -368,7 +366,7 @@ AppState ui_settings_touch(int x, int y, BookReader& reader, void (*enterSleepCb
     
     if (y >= gapTop && y < footerTop) {
         int navY = gapTop + SETTINGS_NAV_GAP_Y;  // Match drawing position
-        int resetY = navY + SETTINGS_RESET_Y_OFFSET;
+        int resetY = footerTop - (FONT_H * 2) - 24;
 
         // Touch zone for tab buttons (wider to match visual buttons)
         if (y >= navY - 10 && y < navY + FONT_H + 10) {

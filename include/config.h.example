@@ -2,7 +2,7 @@
 
 // ─── Firmware Version ──────────────────────────────────────────────
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "0.4.4"
+#define FIRMWARE_VERSION "0.4.5"
 #endif
 
 // ─── WiFi Credentials ───────────────────────────────────────────────

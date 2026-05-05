@@ -9,6 +9,7 @@
 #include <WiFi.h>
 #include <qrcode.h>
 #include <functional>
+#include <cstring>
 
 // ─── Extern declarations for shared helpers in main.cpp ─────────────
 extern void drawHeader(const char* title, bool showBattery = true);
@@ -241,6 +242,10 @@ static void drawQrCode(const char* text, int cx, int cy, int moduleSize) {
     }
 }
 
+// Animation state for connecting dots
+static int connectDots = 0;
+static unsigned long lastDotsUpdate = 0;
+
 void ui_wifi_draw() {
     display_fill_screen(15);
     drawHeader("WiFi Upload");
@@ -264,8 +269,52 @@ void ui_wifi_draw() {
         y += FONT_H + 20;
 
         drawQrCode(ipStr.c_str(), W / 2, y + 120, 5);
+    } else if (wifi_upload_has_error()) {
+        const char* l1 = "WiFi Error";
+        int w1 = display_text_width(l1);
+        display_draw_text((W - w1) / 2, y, l1, 0);
+        y += FONT_H + 16;
+
+        const char* errorMsg = wifi_upload_get_error();
+        if (strlen(errorMsg) > 0) {
+            int w2 = display_text_width(errorMsg);
+            display_draw_text((W - w2) / 2, y, errorMsg, 6);
+        }
+        y += FONT_H + 30;
+
+        const char* hint = "Check WiFi settings";
+        int hw = display_text_width(hint);
+        display_draw_text((W - hw) / 2, y, hint, 8);
+    } else if (wifi_upload_connecting()) {
+        const char* baseText = "Connecting to WiFi";
+        int w1 = display_text_width(baseText);
+        display_draw_text((W - w1) / 2, y, baseText, 0);
+
+        if (millis() - lastDotsUpdate > 500) {
+            connectDots = (connectDots + 1) % 4;
+            lastDotsUpdate = millis();
+        }
+        char dots[5] = "";
+        for (int i = 0; i < connectDots; i++) {
+            strcat(dots, ".");
+        }
+        display_draw_text((W + w1) / 2 + 8, y, dots, 0);
+
+        y += FONT_H + 30;
+
+        int barX = MARGIN_X + 40;
+        int barW = W - barX * 2;
+        int barY = y;
+        int barH = 12;
+        display_draw_rect(barX, barY, barW, barH, 0);
+
+        unsigned long elapsed = millis() % 2000;
+        int fillW = (barW - 4) * elapsed / 2000;
+        if (fillW > 0) {
+            display_draw_filled_rect(barX + 2, barY + 2, fillW, barH - 4, 0);
+        }
     } else {
-        const char* l1 = "Connecting to WiFi...";
+        const char* l1 = "Starting WiFi...";
         int w1 = display_text_width(l1);
         display_draw_text((W - w1) / 2, y, l1, 4);
     }
