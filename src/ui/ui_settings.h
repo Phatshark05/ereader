@@ -8,7 +8,7 @@ class BookReader;
 
 // Draw the settings screen.
 // settingsFromLibrary: if true, uses medium refresh instead of full refresh.
-void ui_settings_draw(bool& settingsFromLibrary);
+void ui_settings_draw(bool& settingsFromLibrary, int selectedIdx = -1);
 
 // Handle touch on settings screen.
 // Returns the new AppState (STATE_LIBRARY, STATE_READER, STATE_WIFI, STATE_OTA_CHECK,

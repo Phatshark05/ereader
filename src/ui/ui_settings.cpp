@@ -16,11 +16,11 @@ static const int H = PORTRAIT_H;
 static const int FONT_H = 50;
 static const int SETTINGS_ROW_H = FONT_H + 8;
 static const int SETTINGS_NAV_GAP_Y = 50;
-static int settingsPage = 0; // 0 = Reading, 1 = Device
+int settingsPage = 0; // 0 = Reading, 1 = Device
 
 // ─── Settings option arrays ─────────────────────────────────────────
-static const char* fontSizeNames[] = {"XS", "S", "M", "M-L", "L"};
-static const int NUM_FONT_SIZES = 5;
+static const char* fontSizeNames[] = {"XS", "S", "M", "M-L", "L", "XL", "XXL"};
+static const int NUM_FONT_SIZES = 7;
 static const char* lineSpacingNames[] = {"Compact", "Normal", "Relaxed", "Spacious", "Extra"};
 static const char* libraryViewNames[] = {"List", "Poster"};
 static const char* librarySortNames[] = {"Title", "Author", "Recent", "Size"};
@@ -51,7 +51,7 @@ static int findRefreshIdx() {
 // Settings screen drawing
 // ═══════════════════════════════════════════════════════════════════
 
-void ui_settings_draw(bool& settingsFromLibrary) {
+void ui_settings_draw(bool& settingsFromLibrary, int selectedIdx) {
     display_fill_screen(15);
     drawHeader(settingsPage == 0 ? "Settings: Reading" : "Settings: Device");
 
@@ -188,6 +188,13 @@ void ui_settings_draw(bool& settingsFromLibrary) {
         y += SETTINGS_ROW_H;
     }
 
+    int rowCount = (settingsPage == 0 ? 8 : 7);
+    if (selectedIdx >= 0 && selectedIdx < rowCount) {
+        int highlightY = HEADER_HEIGHT + MARGIN_Y + 10 + selectedIdx * SETTINGS_ROW_H;
+        display_draw_rect(MARGIN_X - 4, highlightY - 2, W - MARGIN_X * 2 + 8, SETTINGS_ROW_H - 2, 0);
+        display_draw_rect(MARGIN_X - 3, highlightY - 1, W - MARGIN_X * 2 + 6, SETTINGS_ROW_H - 4, 0);
+    }
+
     // Lower gap: page navigation + reset/version in lower gap
     {
         int footerTop = H - FOOTER_HEIGHT;
@@ -221,10 +228,25 @@ void ui_settings_draw(bool& settingsFromLibrary) {
             display_draw_text(W - MARGIN_X - rtw, navY + FONT_H - 4, rightLabel, 3);
         }
 
+        if (selectedIdx == rowCount) {
+            if (settingsPage == 0) {
+                display_draw_rect(MARGIN_X - 2, navY - 7, leftW + 4, FONT_H + 14, 0);
+                display_draw_rect(MARGIN_X - 1, navY - 6, leftW + 2, FONT_H + 12, 0);
+            } else {
+                display_draw_rect(W - MARGIN_X - rightW - 2, navY - 7, rightW + 4, FONT_H + 14, 0);
+                display_draw_rect(W - MARGIN_X - rightW - 1, navY - 6, rightW + 2, FONT_H + 12, 0);
+            }
+        }
+
         int resetY = footerTop - (FONT_H * 2) - 24;
         if (resetY > navY + FONT_H + 20) {
             const char* resetLabel = "[ Reset Defaults ]";
             display_draw_text(MARGIN_X, resetY, resetLabel, 3);
+            if (selectedIdx == rowCount + 1) {
+                int rsw = display_text_width(resetLabel);
+                display_draw_rect(MARGIN_X - 4, resetY - 4, rsw + 8, FONT_H + 8, 0);
+                display_draw_rect(MARGIN_X - 3, resetY - 3, rsw + 6, FONT_H + 6, 0);
+            }
 
             char verLabel[32];
             if (FIRMWARE_VERSION[0] == 'v' || FIRMWARE_VERSION[0] == 'V') {
@@ -238,6 +260,11 @@ void ui_settings_draw(bool& settingsFromLibrary) {
     }
 
     drawBottomBar("[ Back ]");
+    if (selectedIdx == rowCount + 2) {
+        int barY = H - FOOTER_HEIGHT;
+        display_draw_rect(2, barY + 2, W - 4, FOOTER_HEIGHT - 4, 0);
+        display_draw_rect(3, barY + 3, W - 6, FOOTER_HEIGHT - 6, 0);
+    }
     if (settingsFromLibrary) {
         display_update_medium();
         settingsFromLibrary = false;

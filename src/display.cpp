@@ -4,18 +4,22 @@
 #include "debug_trace.h"
 #include <esp_heap_caps.h>
 #include <soc/soc_memory_types.h>
-// Sans-serif fonts (FiraSans) — 5 sizes: XS(9pt) S(11pt) M(14pt) ML(17pt) L(20pt)
+// Sans-serif fonts (FiraSans) — 7 sizes: XS, S, M, ML, L, XL, XXL
 #include "font_xs.h"
 #include "font_s.h"
 #include "font_m.h"
 #include "font_ml.h"
 #include "font_l.h"
-// Serif fonts (NotoSerif) — same 5 sizes
+#include "font_xl.h"
+#include "font_xxl.h"
+// Serif fonts (NotoSerif) — same 7 sizes
 #include "font_serif_xs.h"
 #include "font_serif_s.h"
 #include "font_serif_m.h"
 #include "font_serif_ml.h"
 #include "font_serif_l.h"
+#include "font_serif_xl.h"
+#include "font_serif_xxl.h"
 #include "miniz.h"
 // EPD whine mitigation: the epdiy I2S bus clock can produce an audible
 // whine.  Aggressive approaches (clock-gating I2S1, driving CKH/CKV LOW)
@@ -29,14 +33,14 @@ static uint8_t* _pfb = nullptr;
 // Landscape framebuffer for pushing to hardware: 960 wide × 540 tall
 static uint8_t* _lfb = nullptr;
 
-// 5 size levels × 2 families (sans index 0, serif index 1)
+// 7 size levels × 2 families (sans index 0, serif index 1)
 static const GFXfont* _sans_fonts[] = {
-    &FiraSansXS, &FiraSansS, &FiraSansM, &FiraSansML, &FiraSansL
+    &FiraSansXS, &FiraSansS, &FiraSansM, &FiraSansML, &FiraSansL, &FiraSansXL, &FiraSansXXL
 };
 static const GFXfont* _serif_fonts[] = {
-    &NotoSerifXS, &NotoSerifS, &NotoSerifM, &NotoSerifML, &NotoSerifL
+    &NotoSerifXS, &NotoSerifS, &NotoSerifM, &NotoSerifML, &NotoSerifL, &NotoSerifXL, &NotoSerifXXL
 };
-static const int FONT_SIZE_COUNT = 5;
+static const int FONT_SIZE_COUNT = 7;
 static const GFXfont* _font = &FiraSansM;  // default (level 2 = M)
 
 // Full refresh counter — every N partial updates, do a full refresh

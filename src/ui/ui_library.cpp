@@ -233,7 +233,8 @@ void ui_library_draw(
     int& scroll,
     int filter,
     const std::vector<int>& filteredIndices,
-    bool& firstDraw
+    bool& firstDraw,
+    int selectedIdx
 ) {
     display_set_font_size(2);
     display_fill_screen(15);
@@ -305,6 +306,10 @@ void ui_library_draw(
             int px = MARGIN_X + col * (posterW + gap);
             int py = y + row * (posterH + 14);
             drawDefaultPoster(books[bi], px, py, posterW, posterH);
+            if (vi == selectedIdx) {
+                display_draw_rect(px - 3, py - 3, posterW + 6, posterH + 6, 0);
+                display_draw_rect(px - 2, py - 2, posterW + 4, posterH + 4, 0);
+            }
         }
 
         int itemsOnPage = min(numVisible - scroll, cardsPerPage);
@@ -368,6 +373,11 @@ void ui_library_draw(
                 display_draw_hline(rowX, itemY - 6, rowW, 12);
             }
 
+            if (vi == selectedIdx) {
+                display_draw_rect(rowX - 2, itemY - 2, rowW + 4, BOOK_ITEM_H + 4, 0);
+                display_draw_rect(rowX - 1, itemY - 1, rowW + 2, BOOK_ITEM_H + 2, 0);
+            }
+
             int pct = bookProgressPercent(book);
             int titleMaxW = rowW - 24;
             if (pct >= 0) titleMaxW -= progressBoxW;
@@ -425,6 +435,15 @@ void ui_library_draw(
     }
 
     drawBottomBarSplit("[ Store ]", "[ Settings ]");
+
+    int barY = H - FOOTER_HEIGHT;
+    if (selectedIdx == numVisible) {
+        display_draw_rect(2, barY + 2, W / 2 - 4, FOOTER_HEIGHT - 4, 0);
+        display_draw_rect(3, barY + 3, W / 2 - 6, FOOTER_HEIGHT - 6, 0);
+    } else if (selectedIdx == numVisible + 1) {
+        display_draw_rect(W / 2 + 2, barY + 2, W / 2 - 4, FOOTER_HEIGHT - 4, 0);
+        display_draw_rect(W / 2 + 3, barY + 3, W / 2 - 6, FOOTER_HEIGHT - 6, 0);
+    }
 
     // Pre-cache next page covers in poster view mode
     if (settings_get().libraryViewMode == 1 && !books.empty()) {

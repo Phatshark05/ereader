@@ -67,9 +67,14 @@ static bool btnWasPressed = false;
 static unsigned long lastBtnReleaseTime = 0;
 static int btnPressCount = 0;
 static const unsigned long BUTTON_DEBOUNCE_MS = 50;
-static const unsigned long BUTTON_POWER_MS = 600;   // hold 600ms to sleep
+static const unsigned long BUTTON_POWER_MS = 2000;   // hold 2000ms to sleep
 static const unsigned long DOUBLE_PRESS_WINDOW_MS = 400;
 static unsigned long wakeCooldownEnd = 0;  // No-sleep period after wake
+
+// Selection tracking for non-touch support
+static int librarySelectedIdx = 0;
+static int settingsSelectedIdx = 0;
+extern int settingsPage;
 
 // ─── OTA state ──────────────────────────────────────────────────────
 static OtaState otaState = {OTA_IDLE, "", false, 0};
@@ -222,7 +227,7 @@ static void updateFilteredIndices() {
 }
 
 static void drawLibraryScreen() {
-    ui_library_draw(books, libraryScroll, (int)libraryFilter, filteredIndices, firstLibraryDraw);
+    ui_library_draw(books, libraryScroll, (int)libraryFilter, filteredIndices, firstLibraryDraw, librarySelectedIdx);
     needsRedraw = false;
 }
 
@@ -272,7 +277,7 @@ static void drawBookmarksScreen() {
 // ═══════════════════════════════════════════════════════════════════
 
 static void drawSettingsScreen() {
-    ui_settings_draw(settingsSoftRefreshOnce);
+    ui_settings_draw(settingsSoftRefreshOnce, settingsSelectedIdx);
     needsRedraw = false;
 }
 
@@ -587,7 +592,9 @@ void setup() {
     // Top button is sleep / wake; middle button is for page turns.
     // Both are active LOW.
     pinMode(BUTTON_PIN, INPUT_PULLUP);
-    // PAGE_BUTTON_PIN removed — top button (GPIO 21) handles all input
+    pinMode(BUTTON_PREV_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_NEXT_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
 
     // Set wake cooldown if waking from sleep
     if (wakingFromSleep) {
@@ -818,7 +825,244 @@ static void buttonPageBackward() {
     }
 }
 
+static const int SETTINGS_ROW_H = 58;
+static const int SETTINGS_NAV_GAP_Y = 50;
+
+static void handleButtonSinglePress() {
+    Serial.println("Button Single Press");
+    lastTouchOrButtonTime = millis();
+    lastActivity = millis();
+    
+    if (appState == STATE_READER) {
+        buttonPageForward();
+    } else if (appState == STATE_LIBRARY) {
+        int numVisible = (int)filteredIndices.size();
+        int numSelectables = numVisible + 2; // books + Store + Settings
+        if (numSelectables > 0) {
+            librarySelectedIdx = (librarySelectedIdx + 1) % numSelectables;
+            
+            // Adjust scroll to keep highlighted item visible
+            if (librarySelectedIdx < numVisible) {
+                const Settings& s = settings_get();
+                int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
+                if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) {
+                    listStartY += FONT_H + 20;
+                }
+                int itemsPerPage;
+                if (s.libraryViewMode == 1) {
+                    int posterH = 310;
+                    int rowsVisible = max(1, (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / (posterH + 14));
+                    itemsPerPage = rowsVisible * 2;
+                } else {
+                    itemsPerPage = (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H;
+                }
+                if (itemsPerPage > 0) {
+                    if (librarySelectedIdx < libraryScroll) {
+                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
+                    } else if (librarySelectedIdx >= libraryScroll + itemsPerPage) {
+                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
+                    }
+                }
+            }
+            needsRedraw = true;
+        }
+    } else if (appState == STATE_SETTINGS) {
+        int rowCount = (settingsPage == 0 ? 8 : 7);
+        int numSelectables = rowCount + 3; // rows + tabs + reset + back
+        settingsSelectedIdx = (settingsSelectedIdx + 1) % numSelectables;
+        needsRedraw = true;
+    }
+}
+
+static void handleButtonDoublePress() {
+    Serial.println("Button Double Press");
+    lastTouchOrButtonTime = millis();
+    lastActivity = millis();
+    
+    if (appState == STATE_READER) {
+        buttonPageBackward();
+    } else if (appState == STATE_LIBRARY) {
+        int numVisible = (int)filteredIndices.size();
+        int numSelectables = numVisible + 2;
+        if (numSelectables > 0) {
+            librarySelectedIdx = (librarySelectedIdx + numSelectables - 1) % numSelectables;
+            
+            // Adjust scroll to keep highlighted item visible
+            if (librarySelectedIdx < numVisible) {
+                const Settings& s = settings_get();
+                int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
+                if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) {
+                    listStartY += FONT_H + 20;
+                }
+                int itemsPerPage;
+                if (s.libraryViewMode == 1) {
+                    int posterH = 310;
+                    int rowsVisible = max(1, (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / (posterH + 14));
+                    itemsPerPage = rowsVisible * 2;
+                } else {
+                    itemsPerPage = (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H;
+                }
+                if (itemsPerPage > 0) {
+                    if (librarySelectedIdx < libraryScroll) {
+                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
+                    } else if (librarySelectedIdx >= libraryScroll + itemsPerPage) {
+                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
+                    }
+                }
+            }
+            needsRedraw = true;
+        }
+    } else if (appState == STATE_SETTINGS) {
+        int rowCount = (settingsPage == 0 ? 8 : 7);
+        int numSelectables = rowCount + 3;
+        settingsSelectedIdx = (settingsSelectedIdx + numSelectables - 1) % numSelectables;
+        needsRedraw = true;
+    }
+}
+
+static void handleButtonLongPress() {
+    Serial.println("Button Long Press");
+    lastTouchOrButtonTime = millis();
+    lastActivity = millis();
+    
+    if (appState == STATE_READER) {
+        // Exit to library
+        appState = STATE_LIBRARY;
+        needsRedraw = true;
+    } else if (appState == STATE_LIBRARY) {
+        int numVisible = (int)filteredIndices.size();
+        if (librarySelectedIdx < numVisible) {
+            // Open book
+            int bi = filteredIndices[librarySelectedIdx];
+            Serial.printf("Long press open book: %s\n", books[bi].filepath.c_str());
+            if (reader.openBook(books[bi].filepath.c_str())) {
+                appState = STATE_READER;
+                readerRefresh.fastRefresh = true;
+                readerRefresh.pageTurnsSinceFull = settings_get().refreshEveryPages - 1;
+                needsRedraw = true;
+            }
+        } else if (librarySelectedIdx == numVisible) {
+            // Store
+            opds_store_init();
+            appState = STATE_OPDS_BROWSE;
+            needsRedraw = true;
+        } else if (librarySelectedIdx == numVisible + 1) {
+            // Settings
+            settingsSoftRefreshOnce = true;
+            appState = STATE_SETTINGS;
+            settingsSelectedIdx = 0;
+            needsRedraw = true;
+        }
+    } else if (appState == STATE_SETTINGS) {
+        int rowCount = (settingsPage == 0 ? 8 : 7);
+        if (settingsSelectedIdx < rowCount) {
+            // Row setting selection: tap on the right side of the row to change value
+            int rowY = HEADER_HEIGHT + MARGIN_Y + 10 + settingsSelectedIdx * SETTINGS_ROW_H;
+            int x = W / 2 + 50; 
+            int y = rowY + SETTINGS_ROW_H / 2;
+            appState = ui_settings_touch(x, y, reader, []() { enterDeepSleep(true); });
+            needsRedraw = true;
+        } else if (settingsSelectedIdx == rowCount) {
+            // Tab page toggle: Tap the opposite tab to switch
+            int gapTop = (HEADER_HEIGHT + MARGIN_Y + 10) + SETTINGS_ROW_H * rowCount;
+            int navY = gapTop + SETTINGS_NAV_GAP_Y;
+            int x = (settingsPage == 0) ? (W - MARGIN_X - 10) : MARGIN_X + 10;
+            int y = navY + 10;
+            appState = ui_settings_touch(x, y, reader, []() { enterDeepSleep(true); });
+            needsRedraw = true;
+        } else if (settingsSelectedIdx == rowCount + 1) {
+            // Reset defaults
+            int gapTop = (HEADER_HEIGHT + MARGIN_Y + 10) + SETTINGS_ROW_H * rowCount;
+            int navY = gapTop + SETTINGS_NAV_GAP_Y;
+            int footerTop = H - FOOTER_HEIGHT;
+            int resetY = footerTop - (FONT_H * 2) - 24;
+            int x = MARGIN_X + 10;
+            int y = resetY + 10;
+            appState = ui_settings_touch(x, y, reader, []() { enterDeepSleep(true); });
+            settingsSelectedIdx = 0;
+            needsRedraw = true;
+        } else if (settingsSelectedIdx == rowCount + 2) {
+            // Back
+            int x = W / 2;
+            int y = H - FOOTER_HEIGHT / 2;
+            appState = ui_settings_touch(x, y, reader, []() { enterDeepSleep(true); });
+            needsRedraw = true;
+        }
+    } else if (appState == STATE_WIFI || appState == STATE_OTA_CHECK || 
+               appState == STATE_OPDS_BROWSE || appState == STATE_OPDS_DOWNLOAD) {
+        if (appState == STATE_WIFI) {
+            wifi_upload_stop();
+        }
+        appState = STATE_LIBRARY;
+        needsRedraw = true;
+    }
+}
+
+static void handleOnboardButtonSinglePress() {
+    Serial.println("Onboard Button Press -> BACK");
+    lastTouchOrButtonTime = millis();
+    lastActivity = millis();
+
+    if (appState == STATE_READER) {
+        // Exit reader to library
+        appState = STATE_LIBRARY;
+        needsRedraw = true;
+    } else if (appState == STATE_SETTINGS) {
+        // Exit settings to library or reader
+        settings_save();
+        if (reader.getTitle().length() > 0) {
+            int savedChapter = reader.getCurrentChapter();
+            int savedPage = reader.getCurrentPage();
+            reader.recalculateLayout();
+            reader.jumpToChapter(savedChapter);
+            reader.restorePage(savedPage);
+            appState = STATE_READER;
+        } else {
+            appState = STATE_LIBRARY;
+        }
+        needsRedraw = true;
+    } else if (appState == STATE_WIFI || appState == STATE_OTA_CHECK || 
+               appState == STATE_OPDS_BROWSE || appState == STATE_OPDS_DOWNLOAD) {
+        if (appState == STATE_WIFI) {
+            wifi_upload_stop();
+        }
+        appState = STATE_LIBRARY;
+        needsRedraw = true;
+    }
+}
+
+static void pollExternalButtons() {
+    static unsigned long lastExtBtnDebounce = 0;
+    if (millis() - lastExtBtnDebounce >= 50) {
+        static bool lastPrevState = HIGH;
+        static bool lastNextState = HIGH;
+        static bool lastSelState = HIGH;
+
+        bool prevVal = digitalRead(BUTTON_PREV_PIN);
+        bool nextVal = digitalRead(BUTTON_NEXT_PIN);
+        bool selVal = digitalRead(BUTTON_SELECT_PIN);
+
+        if (prevVal == LOW && lastPrevState == HIGH) {
+            handleButtonDoublePress(); // PREV action (scroll up / page back)
+        }
+        if (nextVal == LOW && lastNextState == HIGH) {
+            handleButtonSinglePress(); // NEXT action (scroll down / page forward)
+        }
+        if (selVal == LOW && lastSelState == HIGH) {
+            handleButtonLongPress();  // SELECT action (enter / click)
+        }
+
+        lastPrevState = prevVal;
+        lastNextState = nextVal;
+        lastSelState = selVal;
+        lastExtBtnDebounce = millis();
+    }
+}
+
 void loop() {
+    // Poll external buttons
+    pollExternalButtons();
+
     if (appState == STATE_WIFI) {
         wifi_upload_handle();
 
@@ -841,41 +1085,39 @@ void loop() {
         }
     }
 
-    // Poll top button (GPIO 21): single=next page, double=prev page, hold=sleep — active LOW
+    // Poll top button (GPIO 21): single/double/long press & sleep triggers — active LOW
     bool btnPressed = (digitalRead(BUTTON_PIN) == LOW);
     if (btnPressed && !btnWasPressed) {
         // Fresh press
         btnDownTime = millis();
         lastTouchOrButtonTime = millis();
     } else if (btnPressed && btnWasPressed) {
-        // Still held — check for long-press sleep trigger
+        // Still held — check for long-press sleep trigger (2 seconds)
         unsigned long heldMs = millis() - btnDownTime;
         // Only allow sleep after wake cooldown expires
         if (heldMs >= BUTTON_POWER_MS && millis() >= wakeCooldownEnd) {
-            Serial.println("Top button long-press — entering deep sleep");
+            Serial.println("Top button long-press (2s) — entering deep sleep");
             btnPressCount = 0;  // clear any queued presses
             enterDeepSleep(true);
         }
     } else if (!btnPressed && btnWasPressed) {
-        // Released — only count as tap if it wasn't a long-press
+        // Released — check hold duration
         unsigned long heldMs = millis() - btnDownTime;
-        if (heldMs >= BUTTON_DEBOUNCE_MS && heldMs < BUTTON_POWER_MS) {
+        if (heldMs >= 500 && heldMs < BUTTON_POWER_MS) {
+            // Medium-long press: Select/Enter or exit
+            handleButtonLongPress();
+            btnPressCount = 0;
+        } else if (heldMs >= BUTTON_DEBOUNCE_MS && heldMs < 500) {
             btnPressCount++;
             lastBtnReleaseTime = millis();
         }
     }
     btnWasPressed = btnPressed;
 
-    // Resolve single vs double press after the window expires
+    // Resolve single press on the onboard button to act as a BACK key
     if (btnPressCount > 0 && !btnPressed &&
         (millis() - lastBtnReleaseTime >= DOUBLE_PRESS_WINDOW_MS)) {
-        if (btnPressCount >= 2) {
-            Serial.println("Top button double-press — previous page");
-            buttonPageBackward();
-        } else {
-            Serial.println("Top button single-press — next page");
-            buttonPageForward();
-        }
+        handleOnboardButtonSinglePress();
         btnPressCount = 0;
     }
 

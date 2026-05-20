@@ -20,7 +20,8 @@ void ui_library_draw(
     int& scroll,
     int filter,
     const std::vector<int>& filteredIndices,
-    bool& firstDraw
+    bool& firstDraw,
+    int selectedIdx = -1
 );
 
 // Handle touch on library screen

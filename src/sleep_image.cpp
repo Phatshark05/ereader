@@ -5,6 +5,7 @@
 #include <SD.h>
 #include <vector>
 #include <algorithm>
+#include <stdarg.h>
 #include <JPEGDEC.h>
 #include <PNGdec.h>
 #include "config.h"
@@ -27,65 +28,6 @@ struct SleepDrawContext {
 
 static SleepDrawContext* g_ctx = nullptr;
 
-static File* openSdFileHandle(const char* path, int32_t* outSize, const char* tag) {
-    if (outSize) *outSize = 0;
-    File* file = new File(SD.open(path, FILE_READ));
-    if (!file || !(*file) || file->isDirectory()) {
-        Serial.printf("Sleep %s: open file failed for %s\n", tag, path ? path : "(null)");
-        if (file) {
-            if (*file) file->close();
-            delete file;
-        }
-        return nullptr;
-    }
-    if (outSize) *outSize = (int32_t)file->size();
-    return file;
-}
-
-static void* jpegFileOpen(const char* path, int32_t* outSize) {
-    return openSdFileHandle(path, outSize, "JPEG");
-}
-
-static int32_t jpegFileRead(JPEGFILE* pFile, uint8_t* pBuf, int32_t len) {
-    if (!pFile || !pFile->fHandle) return 0;
-    return (int32_t)((File*)pFile->fHandle)->read(pBuf, len);
-}
-
-static int32_t jpegFileSeek(JPEGFILE* pFile, int32_t position) {
-    if (!pFile || !pFile->fHandle) return 0;
-    return ((File*)pFile->fHandle)->seek(position) ? position : 0;
-}
-
-static void jpegFileClose(void* handle) {
-    if (!handle) return;
-    File* file = (File*)handle;
-    file->close();
-    delete file;
-}
-
-static void* pngFileOpen(const char* path, int32_t* outSize) {
-    return openSdFileHandle(path, outSize, "PNG");
-}
-
-static int32_t pngFileRead(PNGFILE* pFile, uint8_t* pBuf, int32_t len) {
-    if (!pFile || !pFile->fHandle) return 0;
-    return (int32_t)((File*)pFile->fHandle)->read(pBuf, len);
-}
-
-static int32_t pngFileSeek(PNGFILE* pFile, int32_t position) {
-    if (!pFile || !pFile->fHandle) return 0;
-    return ((File*)pFile->fHandle)->seek(position) ? position : 0;
-}
-
-static void pngFileClose(void* handle) {
-    if (!handle) return;
-    File* file = (File*)handle;
-    file->close();
-    delete file;
-}
-
-
-
 static inline void plot_scaled(int sx, int sy, uint8_t gray4) {
     if (!g_ctx || g_ctx->srcW <= 0 || g_ctx->srcH <= 0) return;
     int dx = g_ctx->dstX + (sx * g_ctx->dstW) / g_ctx->srcW;
@@ -96,6 +38,7 @@ static inline void plot_scaled(int sx, int sy, uint8_t gray4) {
 
 static int jpegDrawCallback(JPEGDRAW* pDraw) {
     if (!g_ctx || !pDraw) return 0;
+
     for (int yy = 0; yy < pDraw->iHeight; yy++) {
         for (int xx = 0; xx < pDraw->iWidth; xx++) {
             int sx = pDraw->x + xx;
@@ -109,6 +52,7 @@ static int jpegDrawCallback(JPEGDRAW* pDraw) {
 
 static int pngDrawCallback(PNGDRAW* pDraw) {
     if (!g_ctx || !pDraw || !g_ctx->pngLineBuffer) return 0;
+
     g_png.getLineAsRGB565(pDraw, g_ctx->pngLineBuffer, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
     for (int xx = 0; xx < pDraw->iWidth; xx++) {
         plot_scaled(xx, pDraw->y, image_rgb565_to_gray4(g_ctx->pngLineBuffer[xx]));
@@ -216,25 +160,47 @@ static bool render_image_file(const String& path, File& file, size_t size) {
     bool isPng = ends_with_ci(path, ".png");
     if (!isJpeg && !isPng) return false;
 
+    // Buffer the entire file into PSRAM to avoid filesystem seeking bugs during decoding
+    uint8_t* fileBuffer = (uint8_t*)ps_malloc(size);
+    if (!fileBuffer) {
+        Serial.printf("Sleep: failed to allocate %u bytes in PSRAM for image\n", (unsigned)size);
+        return false;
+    }
+
+    size_t bytesRead = file.read(fileBuffer, size);
+    if (bytesRead != size) {
+        Serial.printf("Sleep: file read mismatch, expected %u bytes, got %u\n", (unsigned)size, (unsigned)bytesRead);
+        free(fileBuffer);
+        return false;
+    }
+
+
+
     bool ok = false;
     SleepDrawContext ctx;
 
     if (isJpeg) {
-        (void)file;
-        if (!g_jpeg.open(path.c_str(), jpegFileOpen, jpegFileClose, jpegFileRead, jpegFileSeek, jpegDrawCallback)) {
-            Serial.printf("Sleep JPEG: open failed for %s (err=%d)\n",
+        if (!g_jpeg.openRAM(fileBuffer, (int)size, jpegDrawCallback)) {
+            Serial.printf("Sleep JPEG: openRAM failed for %s (err=%d)\n",
                           path.c_str(), g_jpeg.getLastError());
+            free(fileBuffer);
             return false;
         }
         ctx.srcW = g_jpeg.getWidth();
         ctx.srcH = g_jpeg.getHeight();
+        bool isProgressive = (g_jpeg.getJPEGType() == JPEG_MODE_PROGRESSIVE);
+        if (isProgressive) {
+            ctx.srcW = (ctx.srcW + 7) >> 3;
+            ctx.srcH = (ctx.srcH + 7) >> 3;
+        }
         int w = ctx.srcW;
         int h = ctx.srcH;
-        Serial.printf("Sleep JPEG: opened %s (%u bytes, %dx%d)\n",
-                      path.c_str(), (unsigned)size, w, h);
+        Serial.printf("Sleep JPEG: opened %s (%u bytes, %dx%d, progressive=%d)\n",
+                      path.c_str(), (unsigned)size, w, h, isProgressive);
         if (w <= 0 || h <= 0) {
             Serial.printf("Sleep JPEG: invalid dimensions for %s\n", path.c_str());
             g_jpeg.close();
+            free(fileBuffer);
             return false;
         }
 
@@ -250,16 +216,16 @@ static bool render_image_file(const String& path, File& file, size_t size) {
         ctx.dstY = (display_height() - ctx.dstH) / 2;
 
         g_ctx = &ctx;
-
         ok = g_jpeg.decode(0, 0, 0) == 1;
         g_ctx = nullptr;
         Serial.printf("Sleep JPEG: decode %s for %s (err=%d)\n",
                       ok ? "OK" : "FAILED", path.c_str(), g_jpeg.getLastError());
         g_jpeg.close();
     } else {
-        if (g_png.open(path.c_str(), pngFileOpen, pngFileClose, pngFileRead, pngFileSeek, pngDrawCallback) != PNG_SUCCESS) {
-            Serial.printf("Sleep PNG: open failed for %s (err=%d)\n",
+        if (g_png.openRAM(fileBuffer, (int)size, pngDrawCallback) != PNG_SUCCESS) {
+            Serial.printf("Sleep PNG: openRAM failed for %s (err=%d)\n",
                           path.c_str(), g_png.getLastError());
+            free(fileBuffer);
             return false;
         }
         ctx.srcW = g_png.getWidth();
@@ -271,6 +237,7 @@ static bool render_image_file(const String& path, File& file, size_t size) {
         if (w <= 0 || h <= 0) {
             Serial.printf("Sleep PNG: invalid dimensions for %s\n", path.c_str());
             g_png.close();
+            free(fileBuffer);
             return false;
         }
 
@@ -290,6 +257,7 @@ static bool render_image_file(const String& path, File& file, size_t size) {
             Serial.printf("Sleep PNG: line buffer alloc failed (%d bytes) for %s\n",
                           (int)(w * sizeof(uint16_t)), path.c_str());
             g_png.close();
+            free(fileBuffer);
             return false;
         }
 
@@ -303,6 +271,7 @@ static bool render_image_file(const String& path, File& file, size_t size) {
         g_png.close();
     }
 
+    free(fileBuffer);
     return ok;
 }
 
