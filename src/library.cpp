@@ -30,7 +30,7 @@ static bool ensure_dir(const char* path, const char* label) {
 
 bool library_init() {
     SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-    if (!SD.begin(SD_CS, SPI)) {
+    if (!SD.begin(SD_CS, SPI, 4000000U)) {
         Serial.println("SD card mount failed");
         return false;
     }
@@ -46,6 +46,8 @@ bool library_init() {
 
     if (!storageReady) {
         Serial.println("Storage: one or more app folders are unavailable; continuing with existing fallbacks");
+    } else {
+        library_clear_line_cache();
     }
 
     _mounted = true;
@@ -366,4 +368,33 @@ int library_find_current_book(const std::vector<BookInfo>& books) {
         }
     }
     return bestIdx;
+}
+
+void library_clear_line_cache() {
+    Serial.println("Storage: clearing line cache");
+    File dir = SD.open(LINE_CACHE_DIR);
+    if (!dir || !dir.isDirectory()) {
+        if (dir) dir.close();
+        return;
+    }
+    std::vector<String> filesToDelete;
+    File entry;
+    while ((entry = dir.openNextFile())) {
+        if (!entry.isDirectory()) {
+            String filename = entry.name();
+            String fullPath;
+            if (filename.startsWith("/")) {
+                fullPath = filename;
+            } else {
+                fullPath = String(LINE_CACHE_DIR) + "/" + filename;
+            }
+            filesToDelete.push_back(fullPath);
+        }
+        entry.close();
+    }
+    dir.close();
+    for (const auto& path : filesToDelete) {
+        SD.remove(path);
+    }
+    Serial.println("Storage: line cache cleared");
 }

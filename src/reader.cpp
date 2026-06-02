@@ -3,6 +3,7 @@
 #include "config.h"
 #include "settings.h"
 #include "storage_utils.h"
+#include "library.h"
 #include "inline_image.h"
 #include "debug_trace.h"
 #include <ArduinoJson.h>
@@ -32,6 +33,7 @@ static int countWords(const String& text) {
 bool BookReader::openBook(const char* filepath) {
     debug_trace_mark("reader:openBook:start", filepath ? filepath : "");
     closeBook();
+    library_clear_line_cache();
     debug_trace_mark("reader:openBook:after_close");
     if (!_parser.open(filepath)) {
         debug_trace_mark("reader:openBook:parser_open_failed", filepath ? filepath : "");
@@ -138,23 +140,48 @@ void BookReader::loadChapter(int chapter) {
                   chapter, (int)ESP.getFreeHeap(), (int)ESP.getFreePsram());
     yield();
 
-    debug_trace_mark("reader:loadChapter:before_getText", String(chapter));
-    String text = _parser.getChapterText(chapter);
-    debug_trace_mark("reader:loadChapter:after_getText", String(text.length()));
-    Serial.printf("Chapter %d: text %d chars (heap: %d)\n",
-                  chapter, (int)text.length(), (int)ESP.getFreeHeap());
+    if (!SD.exists(LINE_CACHE_DIR)) SD.mkdir(LINE_CACHE_DIR);
+    String plainTextPath = String(LINE_CACHE_DIR) + "/ch" + String(chapter) + "_plain.txt";
 
-    if (text.length() == 0) {
-        Serial.printf("Chapter %d: empty text\n", chapter);
-        text = "[Could not load chapter text]\n\nThe chapter may be too large.";
+    debug_trace_mark("reader:loadChapter:before_getText", String(chapter));
+
+    // Use streaming file-based pipeline: extract + strip HTML → SD file
+    // This avoids ever holding the full chapter text as a String in RAM.
+    bool gotText = _parser.getChapterTextToFile(chapter, plainTextPath);
+    debug_trace_mark("reader:loadChapter:after_getText", gotText ? "ok" : "failed");
+
+    if (!gotText) {
+        Serial.printf("Chapter %d: getChapterTextToFile failed, falling back to String\n", chapter);
+        // Fallback: try the old String-based path
+        String text = _parser.getChapterText(chapter);
+        Serial.printf("Chapter %d: text %d chars (heap: %d)\n",
+                      chapter, (int)text.length(), (int)ESP.getFreeHeap());
+        if (text.length() == 0) {
+            text = "[Could not load chapter text]\n\nThe chapter may be too large.";
+        }
+        _currentChapterWordCount = countWords(text);
+        debug_trace_mark("reader:loadChapter:before_wrap", String(text.length()));
+        wrapTextToFile(text);
+    } else {
+        // Check file size for diagnostics
+        File pf = SD.open(plainTextPath, FILE_READ);
+        size_t plainSize = pf ? pf.size() : 0;
+        if (pf) pf.close();
+        Serial.printf("Chapter %d: plain text %d bytes on SD (heap: %d)\n",
+                      chapter, (int)plainSize, (int)ESP.getFreeHeap());
+        if (plainSize == 0) {
+            SD.remove(plainTextPath);
+            String text = "[Could not load chapter text]\n\nThe chapter may be too large.";
+            _currentChapterWordCount = 0;
+            wrapTextToFile(text);
+        } else {
+            debug_trace_mark("reader:loadChapter:before_wrap", String(plainSize));
+            wrapTextFromFile(plainTextPath);
+            SD.remove(plainTextPath);
+        }
     }
 
-    _currentChapterWordCount = countWords(text);
-
-    debug_trace_mark("reader:loadChapter:before_wrap", String(text.length()));
-    wrapTextToFile(text);
     debug_trace_mark("reader:loadChapter:after_wrap", String(_totalLines));
-    text = String();  // free source text
 
     Serial.printf("Chapter %d: %d lines on SD (heap: %d)\n",
                   chapter, _totalLines, (int)ESP.getFreeHeap());
@@ -482,6 +509,147 @@ void BookReader::wrapTextToFile(const String& text) {
         start = nl + 1;
     }
 
+    f.close();
+}
+
+// wrapTextFromFile — reads plain-text paragraphs from an SD file, wraps them
+// into display lines, and writes to the line cache.  Avoids holding the full
+// chapter text as a String in RAM.
+void BookReader::wrapTextFromFile(const String& srcPath) {
+    if (!SD.exists(LINE_CACHE_DIR)) SD.mkdir(LINE_CACHE_DIR);
+
+    _lineCachePath = String(LINE_CACHE_DIR) + "/ch" + String(_currentChapter) + ".txt";
+    _lineOffsets.clear();
+    _totalLines = 0;
+
+    File src = SD.open(srcPath, FILE_READ);
+    if (!src) {
+        Serial.printf("wrapTextFromFile: cannot open %s\n", srcPath.c_str());
+        return;
+    }
+    File f = SD.open(_lineCachePath, FILE_WRITE);
+    if (!f) {
+        src.close();
+        Serial.println("ERROR: cannot open line cache for writing");
+        return;
+    }
+
+    int spaceWidth  = display_text_width(" ");
+    int indentWidth = spaceWidth * 3;
+    unsigned long lastYieldMs = millis();
+    int totalCharsProcessed = 0;
+
+    while (src.available()) {
+        if (millis() - lastYieldMs >= 50) { yield(); lastYieldMs = millis(); }
+
+        String paragraph = src.readStringUntil('\n');
+        paragraph.trim();
+        totalCharsProcessed += paragraph.length();
+
+        // Safety limit: stop if we have processed an enormous amount
+        if (totalCharsProcessed > MAX_WRAP_TEXT_CHARS) {
+            writeLine(f, _lineOffsets, "");
+            writeLine(f, _lineOffsets, "[Section truncated for device stability]");
+            _totalLines += 2;
+            break;
+        }
+
+        if (paragraph.length() == 0) {
+            writeLine(f, _lineOffsets, "");
+            _totalLines++;
+            continue;
+        }
+
+        // Handle image markers
+        if (paragraph[0] == IMG_MARKER_BYTE) {
+            String imgPath;
+            if (inline_image_parse_raw(paragraph, imgPath)) {
+                bool probed = false;
+                if ((int)ESP.getFreeHeap() > 30000) {
+                    int lineH = display_font_height() + _lineSpacing;
+                    int maxImgH = _linesPerPage * lineH;
+                    InlineImageInfo info;
+                    if (inline_image_probe(_parser, _filepath, imgPath, _maxLineWidth, maxImgH, info)) {
+                        info.linesConsumed = max(1, (info.displayH + lineH - 1) / lineH);
+                        writeLine(f, _lineOffsets, inline_image_build_marker(
+                            info.assetPath, info.displayW, info.displayH, info.linesConsumed));
+                        _totalLines++;
+                        for (int j = 1; j < info.linesConsumed; j++) {
+                            writeLine(f, _lineOffsets, IMG_CONT_MARKER);
+                            _totalLines++;
+                        }
+                        probed = true;
+                    }
+                }
+                if (!probed) {
+                    writeLine(f, _lineOffsets, "[Image]");
+                    _totalLines++;
+                }
+                continue;
+            }
+        }
+
+        // Word-wrap the paragraph
+        String currentLine;
+        int currentWidth = 0;
+        bool firstLine = true;
+
+        int wStart = 0;
+        int paraLen = paragraph.length();
+        while (wStart < paraLen) {
+            while (wStart < paraLen && paragraph[wStart] == ' ') wStart++;
+            if (wStart >= paraLen) break;
+
+            int wEnd = wStart;
+            while (wEnd < paraLen && paragraph[wEnd] != ' ') wEnd++;
+
+            String word = paragraph.substring(wStart, wEnd);
+            int wordWidth = display_text_width(word.c_str());
+
+            if (currentLine.length() == 0) {
+                if (firstLine) { currentLine = "   "; currentWidth = indentWidth; }
+                if (currentWidth + wordWidth > _maxLineWidth) {
+                    String partial = currentLine;
+                    int pw = currentWidth;
+                    for (int ci = 0; ci < (int)word.length(); ci++) {
+                        char ch[2] = { word[ci], 0 };
+                        int cw = display_text_width(ch);
+                        if (pw + cw > _maxLineWidth && partial.length() > 0) {
+                            writeLine(f, _lineOffsets, partial);
+                            _totalLines++;
+                            firstLine = false;
+                            partial = "";
+                            pw = 0;
+                        }
+                        partial += word[ci];
+                        pw += cw;
+                    }
+                    if (partial.length() > 0) { currentLine = partial; currentWidth = pw; }
+                } else {
+                    currentLine += word;
+                    currentWidth += wordWidth;
+                    firstLine = false;
+                }
+            } else if (currentWidth + spaceWidth + wordWidth <= _maxLineWidth) {
+                currentLine += " " + word;
+                currentWidth += spaceWidth + wordWidth;
+            } else {
+                writeLine(f, _lineOffsets, currentLine);
+                _totalLines++;
+                firstLine = false;
+                currentLine = word;
+                currentWidth = wordWidth;
+            }
+            wStart = wEnd;
+        }
+
+        if (currentLine.length() > 0) {
+            writeLine(f, _lineOffsets, currentLine);
+            _totalLines++;
+        }
+    }
+
+    src.close();
     f.close();
 }
 

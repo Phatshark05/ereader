@@ -21,7 +21,8 @@ void ui_library_draw(
     int filter,
     const std::vector<int>& filteredIndices,
     bool& firstDraw,
-    int selectedIdx = -1
+    int selectedIdx = -1,
+    bool updateDisplay = true
 );
 
 // Handle touch on library screen
@@ -41,3 +42,5 @@ AppState ui_library_touch(
     int& filter,
     std::vector<int>& filteredIndices
 );
+
+int ui_library_get_list_start_y(const std::vector<BookInfo>& books, int filter);

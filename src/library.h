@@ -33,3 +33,5 @@ std::vector<int> library_filter(const std::vector<BookInfo>& books,
 
 // Returns index of the most-recently-read book (with progress), or -1
 int library_find_current_book(const std::vector<BookInfo>& books);
+
+void library_clear_line_cache();

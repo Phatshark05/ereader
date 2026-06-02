@@ -147,9 +147,26 @@ static uint32_t next_codepoint(const uint8_t** pp) {
     return cp;
 }
 
+static uint32_t normalize_codepoint(uint32_t cp) {
+    switch (cp) {
+        case 160:  return 32;   // non-breaking space -> space
+        case 8211: return 45;   // en dash -> -
+        case 8212: return 45;   // em dash -> -
+        case 8216: return 39;   // left single quote -> '
+        case 8217: return 39;   // right single quote -> '
+        case 8218: return 44;   // single low-9 quote -> ,
+        case 8220: return 34;   // left double quote -> "
+        case 8221: return 34;   // right double quote -> "
+        case 8222: return 34;   // double low-9 quote -> "
+        case 8230: return 46;   // ellipsis -> .
+        default:   return cp;
+    }
+}
+
 // ─── Custom glyph renderer (portrait buffer) ──────────────────────
 
 static void draw_glyph(int* cursor_x, int cursor_y, uint32_t cp, uint8_t fg) {
+    cp = normalize_codepoint(cp);
     GFXglyph* glyph = nullptr;
     get_glyph(_font, cp, &glyph);
     if (!glyph) return;
@@ -328,7 +345,11 @@ static void rotatePortraitToLandscape() {
     memset(_lfb, 0xFF, PHYS_WIDTH * PHYS_HEIGHT / 2);
 
     for (int px = 0; px < pw; px++) {
+#if FLIP_180
+        int ly = px;
+#else
         int ly = (pw - 1) - px;
+#endif
         uint8_t* lrow = _lfb + ly * l_stride;
 
         // Portrait column px: read from _pfb[py * p_stride + px/2]
@@ -340,7 +361,11 @@ static void rotatePortraitToLandscape() {
             uint8_t val = px_odd ? (pbyte & 0x0F) : ((pbyte >> 4) & 0x0F);
 
             // lx = py — epdiy expects even pixels in LOW nibble, odd in HIGH
+#if FLIP_180
+            int lx = (ph - 1) - py;
+#else
             int lx = py;
+#endif
             int l_byte = lx / 2;
             if (lx & 1) {
                 lrow[l_byte] = (lrow[l_byte] & 0x0F) | ((val & 0x0F) << 4);
@@ -360,8 +385,13 @@ static Rect_t portraitRectToLandscape(int x, int y, int w, int h) {
     if (h < 0) h = 0;
 
     Rect_t area;
+#if FLIP_180
+    area.x = PORTRAIT_H - (y + h);
+    area.y = x;
+#else
     area.x = y;
     area.y = PORTRAIT_W - (x + w);
+#endif
     area.width = h;
     area.height = w;
     return area;
@@ -478,9 +508,14 @@ static uint8_t* rotatePortraitRegion(int px, int py, int pw, int ph, Rect_t& out
     if (py + ph > PORTRAIT_H) ph = PORTRAIT_H - py;
     if (pw <= 0 || ph <= 0) return nullptr;
 
-    // Landscape coords: lx = py..py+ph-1, ly = (PW-1)-(px+pw-1)..(PW-1)-px
+    // Landscape coords
+#if FLIP_180
+    outArea.x = (PORTRAIT_H - 1) - (py + ph - 1);
+    outArea.y = px;
+#else
     outArea.x = py;
     outArea.y = (PORTRAIT_W - 1) - (px + pw - 1);
+#endif
     outArea.width = ph;
     outArea.height = pw;
 
@@ -493,8 +528,12 @@ static uint8_t* rotatePortraitRegion(int px, int py, int pw, int ph, Rect_t& out
     int p_stride = PORTRAIT_W / 2;  // bytes per portrait row
 
     for (int col = px; col < px + pw; col++) {
-        // Portrait column 'col' maps to landscape row ly = (PW-1) - col
+        // Portrait column 'col' maps to landscape row
+#if FLIP_180
+        int ly = col;
+#else
         int ly = (PORTRAIT_W - 1) - col;
+#endif
         int outRow = ly - outArea.y;  // row index within output buffer
         uint8_t* dstRow = out + outRow * l_stride;
 
@@ -506,8 +545,12 @@ static uint8_t* rotatePortraitRegion(int px, int py, int pw, int ph, Rect_t& out
             uint8_t pbyte = _pfb[row * p_stride + p_byte_col];
             uint8_t val = col_odd ? (pbyte & 0x0F) : ((pbyte >> 4) & 0x0F);
 
-            // Landscape lx = row, offset within output = lx - outArea.x
+            // Landscape lx offset within output
+#if FLIP_180
+            int outCol = ((PORTRAIT_H - 1) - row) - outArea.x;
+#else
             int outCol = row - outArea.x;
+#endif
             int dstByte = outCol / 2;
             if (outCol & 1) {
                 dstRow[dstByte] = (dstRow[dstByte] & 0x0F) | ((val & 0x0F) << 4);
@@ -574,6 +617,7 @@ int display_text_width(const char* text) {
     const uint8_t* p = (const uint8_t*)text;
     uint32_t cp;
     while ((cp = next_codepoint(&p)) != 0) {
+        cp = normalize_codepoint(cp);
         GFXglyph* glyph = nullptr;
         get_glyph(_font, cp, &glyph);
         if (glyph) w += glyph->advance_x;

@@ -137,7 +137,9 @@ private:
     void loadChapter(int chapter);
     void updatePageLines();
     void paginateLines();
-    void wrapTextToFile(const String& text);  // write wrapped lines to SD cache
+    void wrapTextToFile(const String& text);      // write wrapped lines to SD cache (from String)
+    void wrapTextFromFile(const String& srcPath); // write wrapped lines to SD cache (from SD file)
+
     String readLineFromCache(int lineIndex);   // read single line from SD cache
     void recordPageTurnTime();
     void notePageShown();

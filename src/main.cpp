@@ -72,7 +72,10 @@ static const unsigned long DOUBLE_PRESS_WINDOW_MS = 400;
 static unsigned long wakeCooldownEnd = 0;  // No-sleep period after wake
 
 // Selection tracking for non-touch support
-static int librarySelectedIdx = 0;
+static int librarySelectedIdx = 4;
+static int lastLibrarySelectedIdx = 4;
+static int lastLibraryScroll = 0;
+static LibraryFilter lastLibraryFilter = FILTER_ALL;
 static int settingsSelectedIdx = 0;
 extern int settingsPage;
 
@@ -226,8 +229,95 @@ static void updateFilteredIndices() {
     filteredIndices = library_filter(books, libraryFilter);
 }
 
+static void getLibraryItemRect(int idx, int numVisible, int scroll, int& rx, int& ry, int& rw, int& rh) {
+    rx = 0; ry = 0; rw = 0; rh = 0;
+    if (idx < 0) return;
+
+    if (idx < 4) {
+        // Tab
+        int tabW = W / 4;
+        rx = idx * tabW - 4;
+        ry = HEADER_HEIGHT - 6;
+        rw = tabW + 8;
+        rh = FILTER_TAB_H + 12;
+    } else if (idx >= 4 && idx < 4 + numVisible) {
+        int vi = idx - 4;
+        const Settings& s = settings_get();
+        if (s.libraryViewMode == 1) {
+            // Poster mode
+            const int cols = 2;
+            const int gap = 18;
+            int posterH = 310;
+            int posterW = (W - MARGIN_X * 2 - gap) / cols;
+            int listStartY = ui_library_get_list_start_y(books, libraryFilter);
+            int rel = vi - scroll;
+            if (rel >= 0) {
+                int row = rel / cols;
+                int col = rel % cols;
+                rx = MARGIN_X + col * (posterW + gap) - 6;
+                ry = listStartY + row * (posterH + 14) - 6;
+                rw = posterW + 12;
+                rh = posterH + 12;
+            }
+        } else {
+            // List mode
+            int listStartY = ui_library_get_list_start_y(books, libraryFilter);
+            int rel = vi - scroll;
+            if (rel >= 0) {
+                rx = MARGIN_X - 6;
+                ry = listStartY + rel * BOOK_ITEM_H - 6;
+                rw = W - MARGIN_X * 2 + 12;
+                rh = BOOK_ITEM_H + 12;
+            }
+        }
+    } else if (idx == 4 + numVisible) {
+        // Store
+        rx = 0;
+        ry = H - FOOTER_HEIGHT - 6;
+        rw = W / 2 + 4;
+        rh = FOOTER_HEIGHT + 12;
+    } else if (idx == 4 + numVisible + 1) {
+        // Settings
+        rx = W / 2 - 4;
+        ry = H - FOOTER_HEIGHT - 6;
+        rw = W / 2 + 8;
+        rh = FOOTER_HEIGHT + 12;
+    }
+}
+
 static void drawLibraryScreen() {
-    ui_library_draw(books, libraryScroll, (int)libraryFilter, filteredIndices, firstLibraryDraw, librarySelectedIdx);
+    int numVisible = (int)filteredIndices.size();
+
+    // Check if we can perform a region refresh for selection change
+    bool selectionOnlyChange = (!firstLibraryDraw &&
+                                libraryScroll == lastLibraryScroll &&
+                                libraryFilter == lastLibraryFilter &&
+                                librarySelectedIdx != lastLibrarySelectedIdx);
+
+    if (selectionOnlyChange) {
+        // 1. Draw the new UI state to the framebuffer (but do NOT update the display yet)
+        ui_library_draw(books, libraryScroll, (int)libraryFilter, filteredIndices, firstLibraryDraw, librarySelectedIdx, false);
+
+        // 2. Perform a region refresh (with clear cycles) for the old and new selection boxes
+        int ox, oy, ow, oh;
+        getLibraryItemRect(lastLibrarySelectedIdx, numVisible, libraryScroll, ox, oy, ow, oh);
+        int nx, ny, nw, nh;
+        getLibraryItemRect(librarySelectedIdx, numVisible, libraryScroll, nx, ny, nw, nh);
+
+        if (ow > 0 && oh > 0) {
+            display_update_reader_body(ox, oy, ow, oh, false);
+        }
+        if (nw > 0 && nh > 0) {
+            display_update_reader_body(nx, ny, nw, nh, false);
+        }
+    } else {
+        // Normal full redraw + display update
+        ui_library_draw(books, libraryScroll, (int)libraryFilter, filteredIndices, firstLibraryDraw, librarySelectedIdx, true);
+    }
+
+    lastLibrarySelectedIdx = librarySelectedIdx;
+    lastLibraryScroll = libraryScroll;
+    lastLibraryFilter = libraryFilter;
     needsRedraw = false;
 }
 
@@ -307,7 +397,10 @@ static void drawWifiScreen() {
 static void handleLibraryTouch(int x, int y) {
     int filter = (int)libraryFilter;
     AppState newState = ui_library_touch(x, y, books, libraryScroll, filter, filteredIndices);
-    libraryFilter = (LibraryFilter)filter;
+    if ((LibraryFilter)filter != libraryFilter) {
+        libraryFilter = (LibraryFilter)filter;
+        librarySelectedIdx = 0; // Reset button highlight when filter changes via touch
+    }
 
     if (newState == STATE_READER) {
         // First draw after opening a book: use medium refresh for cleaner display
@@ -780,8 +873,7 @@ static void buttonPageForward() {
     } else if (appState == STATE_LIBRARY && !filteredIndices.empty()) {
         const Settings& s = settings_get();
         int numVis = (int)filteredIndices.size();
-        int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
-        if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) listStartY += FONT_H + 20;
+        int listStartY = ui_library_get_list_start_y(books, libraryFilter);
         int itemsPerPage;
         if (s.libraryViewMode == 1) {
             int posterH = 310;
@@ -807,8 +899,7 @@ static void buttonPageBackward() {
         }
     } else if (appState == STATE_LIBRARY && !filteredIndices.empty()) {
         const Settings& s = settings_get();
-        int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
-        if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) listStartY += FONT_H + 20;
+        int listStartY = ui_library_get_list_start_y(books, libraryFilter);
         int itemsPerPage;
         if (s.libraryViewMode == 1) {
             int posterH = 310;
@@ -837,17 +928,15 @@ static void handleButtonSinglePress() {
         buttonPageForward();
     } else if (appState == STATE_LIBRARY) {
         int numVisible = (int)filteredIndices.size();
-        int numSelectables = numVisible + 2; // books + Store + Settings
+        int numSelectables = numVisible + 6; // 4 tabs + books + Store + Settings
         if (numSelectables > 0) {
             librarySelectedIdx = (librarySelectedIdx + 1) % numSelectables;
             
-            // Adjust scroll to keep highlighted item visible
-            if (librarySelectedIdx < numVisible) {
+            // Adjust scroll to keep highlighted item visible if a book is highlighted
+            if (librarySelectedIdx >= 4 && librarySelectedIdx < 4 + numVisible) {
+                int bookVi = librarySelectedIdx - 4;
                 const Settings& s = settings_get();
-                int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
-                if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) {
-                    listStartY += FONT_H + 20;
-                }
+                int listStartY = ui_library_get_list_start_y(books, libraryFilter);
                 int itemsPerPage;
                 if (s.libraryViewMode == 1) {
                     int posterH = 310;
@@ -857,10 +946,10 @@ static void handleButtonSinglePress() {
                     itemsPerPage = (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H;
                 }
                 if (itemsPerPage > 0) {
-                    if (librarySelectedIdx < libraryScroll) {
-                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
-                    } else if (librarySelectedIdx >= libraryScroll + itemsPerPage) {
-                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
+                    if (bookVi < libraryScroll) {
+                        libraryScroll = (bookVi / itemsPerPage) * itemsPerPage;
+                    } else if (bookVi >= libraryScroll + itemsPerPage) {
+                        libraryScroll = (bookVi / itemsPerPage) * itemsPerPage;
                     }
                 }
             }
@@ -883,17 +972,15 @@ static void handleButtonDoublePress() {
         buttonPageBackward();
     } else if (appState == STATE_LIBRARY) {
         int numVisible = (int)filteredIndices.size();
-        int numSelectables = numVisible + 2;
+        int numSelectables = numVisible + 6; // 4 tabs + books + Store + Settings
         if (numSelectables > 0) {
             librarySelectedIdx = (librarySelectedIdx + numSelectables - 1) % numSelectables;
             
-            // Adjust scroll to keep highlighted item visible
-            if (librarySelectedIdx < numVisible) {
+            // Adjust scroll to keep highlighted item visible if a book is highlighted
+            if (librarySelectedIdx >= 4 && librarySelectedIdx < 4 + numVisible) {
+                int bookVi = librarySelectedIdx - 4;
                 const Settings& s = settings_get();
-                int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
-                if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) {
-                    listStartY += FONT_H + 20;
-                }
+                int listStartY = ui_library_get_list_start_y(books, libraryFilter);
                 int itemsPerPage;
                 if (s.libraryViewMode == 1) {
                     int posterH = 310;
@@ -903,10 +990,10 @@ static void handleButtonDoublePress() {
                     itemsPerPage = (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H;
                 }
                 if (itemsPerPage > 0) {
-                    if (librarySelectedIdx < libraryScroll) {
-                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
-                    } else if (librarySelectedIdx >= libraryScroll + itemsPerPage) {
-                        libraryScroll = (librarySelectedIdx / itemsPerPage) * itemsPerPage;
+                    if (bookVi < libraryScroll) {
+                        libraryScroll = (bookVi / itemsPerPage) * itemsPerPage;
+                    } else if (bookVi >= libraryScroll + itemsPerPage) {
+                        libraryScroll = (bookVi / itemsPerPage) * itemsPerPage;
                     }
                 }
             }
@@ -931,9 +1018,19 @@ static void handleButtonLongPress() {
         needsRedraw = true;
     } else if (appState == STATE_LIBRARY) {
         int numVisible = (int)filteredIndices.size();
-        if (librarySelectedIdx < numVisible) {
+        if (librarySelectedIdx < 4) {
+            // Filter tab selected
+            int newFilter = librarySelectedIdx;
+            if (newFilter != (int)libraryFilter) {
+                libraryFilter = (LibraryFilter)newFilter;
+                libraryScroll = 0;
+                filteredIndices = library_filter(books, libraryFilter);
+                librarySelectedIdx = 4; // highlight the first book in the new filter tab
+                needsRedraw = true;
+            }
+        } else if (librarySelectedIdx >= 4 && librarySelectedIdx < 4 + numVisible) {
             // Open book
-            int bi = filteredIndices[librarySelectedIdx];
+            int bi = filteredIndices[librarySelectedIdx - 4];
             Serial.printf("Long press open book: %s\n", books[bi].filepath.c_str());
             if (reader.openBook(books[bi].filepath.c_str())) {
                 appState = STATE_READER;
@@ -941,12 +1038,12 @@ static void handleButtonLongPress() {
                 readerRefresh.pageTurnsSinceFull = settings_get().refreshEveryPages - 1;
                 needsRedraw = true;
             }
-        } else if (librarySelectedIdx == numVisible) {
+        } else if (librarySelectedIdx == 4 + numVisible) {
             // Store
             opds_store_init();
             appState = STATE_OPDS_BROWSE;
             needsRedraw = true;
-        } else if (librarySelectedIdx == numVisible + 1) {
+        } else if (librarySelectedIdx == 4 + numVisible + 1) {
             // Settings
             settingsSoftRefreshOnce = true;
             appState = STATE_SETTINGS;
@@ -1180,8 +1277,7 @@ void loop() {
                     const Settings& s = settings_get();
                     int numVis = (int)filteredIndices.size();
                     int itemsPerPage;
-                    int listStartY = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
-                    if (library_find_current_book(books) >= 0 && libraryFilter == FILTER_ALL) listStartY += FONT_H + 20;
+                    int listStartY = ui_library_get_list_start_y(books, libraryFilter);
                     if (s.libraryViewMode == 1) {
                         int posterH = 310;
                         int rowsVisible = max(1, (H - listStartY - FOOTER_HEIGHT - MARGIN_Y) / (posterH + 14));
@@ -1245,6 +1341,12 @@ void loop() {
         ui_ota_tick(otaState);
         needsRedraw = true;
     }
+
+    static AppState lastAppState = appState;
+    if (appState == STATE_LIBRARY && lastAppState != STATE_LIBRARY) {
+        firstLibraryDraw = true;
+    }
+    lastAppState = appState;
 
     // Redraw if needed
     if (needsRedraw) {

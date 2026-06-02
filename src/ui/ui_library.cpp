@@ -199,7 +199,7 @@ static void drawDefaultPoster(BookInfo& book, int x, int y, int w, int h) {
     }
 }
 
-static void drawFilterTabs(int activeFilter) {
+static void drawFilterTabs(int activeFilter, int selectedIdx = -1) {
     int tabY = HEADER_HEIGHT;
     display_draw_filled_rect(0, tabY, W, FILTER_TAB_H, 14);
 
@@ -209,6 +209,10 @@ static void drawFilterTabs(int activeFilter) {
         if (i == activeFilter) {
             display_draw_filled_rect(tx + 2, tabY + 2, tabW - 4, FILTER_TAB_H - 4, 15);
             display_draw_hline(tx + 2, tabY + FILTER_TAB_H - 2, tabW - 4, 0);
+        }
+        if (selectedIdx == i) {
+            display_draw_rect(tx + 4, tabY + 4, tabW - 8, FILTER_TAB_H - 8, 0);
+            display_draw_rect(tx + 5, tabY + 5, tabW - 10, FILTER_TAB_H - 10, 0);
         }
         int tw = display_text_width(filterNames[i]);
         uint8_t color = (i == activeFilter) ? 0 : 6;
@@ -234,16 +238,18 @@ void ui_library_draw(
     int filter,
     const std::vector<int>& filteredIndices,
     bool& firstDraw,
-    int selectedIdx
+    int selectedIdx,
+    bool updateDisplay
 ) {
     display_set_font_size(2);
     display_fill_screen(15);
     drawHeader("Library");
-    drawFilterTabs(filter);
 
     const Settings& s = settings_get();
     const auto& visibleIdx = filteredIndices;
     int numVisible = (int)visibleIdx.size();
+
+    drawFilterTabs(filter, selectedIdx);
 
     if (books.empty()) {
         int cy = H / 2 - 60;
@@ -288,7 +294,7 @@ void ui_library_draw(
             }
             display_draw_text(MARGIN_X + labelW, bannerY, contTitle.c_str(), 0);
             display_draw_hline(0, y + bannerH, W, 10);
-            y += bannerH + MARGIN_Y + 16;  // Extra padding before book grid
+            y = ui_library_get_list_start_y(books, filter);
         }
 
         const int cols = 2;
@@ -306,7 +312,7 @@ void ui_library_draw(
             int px = MARGIN_X + col * (posterW + gap);
             int py = y + row * (posterH + 14);
             drawDefaultPoster(books[bi], px, py, posterW, posterH);
-            if (vi == selectedIdx) {
+            if (vi == selectedIdx - 4) {
                 display_draw_rect(px - 3, py - 3, posterW + 6, posterH + 6, 0);
                 display_draw_rect(px - 2, py - 2, posterW + 4, posterH + 4, 0);
             }
@@ -354,7 +360,7 @@ void ui_library_draw(
             }
             display_draw_text(MARGIN_X + labelW, bannerY, contTitle.c_str(), 0);
             display_draw_hline(0, y + bannerH, W, 10);
-            y += bannerH + MARGIN_Y + 16;  // Extra padding before book list
+            y = ui_library_get_list_start_y(books, filter);
         }
 
         int maxVis = max(1, (H - y - FOOTER_HEIGHT - MARGIN_Y) / BOOK_ITEM_H);
@@ -373,7 +379,7 @@ void ui_library_draw(
                 display_draw_hline(rowX, itemY - 6, rowW, 12);
             }
 
-            if (vi == selectedIdx) {
+            if (vi == selectedIdx - 4) {
                 display_draw_rect(rowX - 2, itemY - 2, rowW + 4, BOOK_ITEM_H + 4, 0);
                 display_draw_rect(rowX - 1, itemY - 1, rowW + 2, BOOK_ITEM_H + 2, 0);
             }
@@ -437,10 +443,10 @@ void ui_library_draw(
     drawBottomBarSplit("[ Store ]", "[ Settings ]");
 
     int barY = H - FOOTER_HEIGHT;
-    if (selectedIdx == numVisible) {
+    if (selectedIdx == 4 + numVisible) {
         display_draw_rect(2, barY + 2, W / 2 - 4, FOOTER_HEIGHT - 4, 0);
         display_draw_rect(3, barY + 3, W / 2 - 6, FOOTER_HEIGHT - 6, 0);
-    } else if (selectedIdx == numVisible + 1) {
+    } else if (selectedIdx == 4 + numVisible + 1) {
         display_draw_rect(W / 2 + 2, barY + 2, W / 2 - 4, FOOTER_HEIGHT - 4, 0);
         display_draw_rect(W / 2 + 3, barY + 3, W / 2 - 6, FOOTER_HEIGHT - 6, 0);
     }
@@ -456,11 +462,13 @@ void ui_library_draw(
         cover_precache_page(books, filteredIndices, scroll, cardsPerPage);
     }
 
-    if (firstDraw) {
-        firstDraw = false;
-        display_update();
-    } else {
-        display_update_medium();
+    if (updateDisplay) {
+        if (firstDraw) {
+            firstDraw = false;
+            display_update();
+        } else {
+            display_update_partial();
+        }
     }
 }
 
@@ -517,8 +525,8 @@ AppState ui_library_touch(
             }
             return STATE_LIBRARY;
         }
-        listStartY = bannerBottom;
     }
+    listStartY = ui_library_get_list_start_y(books, filter);
 
     if (s.libraryViewMode == 1) {
         const int cols = 2;
@@ -592,3 +600,13 @@ AppState ui_library_touch(
 
     return STATE_LIBRARY;
 }
+
+int ui_library_get_list_start_y(const std::vector<BookInfo>& books, int filter) {
+    int y = HEADER_HEIGHT + FILTER_TAB_H + MARGIN_Y;
+    int currentIdx = library_find_current_book(books);
+    if (currentIdx >= 0 && filter == FILTER_ALL) {
+        y += (FONT_H + 16) + MARGIN_Y + 16;
+    }
+    return y;
+}
+

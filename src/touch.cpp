@@ -7,6 +7,9 @@ static TouchDrvGT911 _touch;
 static bool _initialized = false;
 
 bool touch_init() {
+    Serial.println("Touchscreen disabled in software to prevent button conflict.");
+    return false;
+
     // Wake GT911 from sleep: drive INT pin HIGH before I2C init.
     // Required per LilyGo official example — GT911 may be asleep after power-on.
     if (TOUCH_INT_PIN >= 0) {

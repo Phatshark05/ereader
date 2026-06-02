@@ -158,7 +158,15 @@ uint8_t* ZipReader::readFile(const char* name, size_t* outSize) {
 
         if (entry.compression_method == 0) {
             // STORED — just read directly
-            uint8_t* data = (uint8_t*)ps_malloc(entry.uncompressed_size + 1);
+            // Prefer internal SRAM to avoid PSRAM cache corruption on ESP32-S3
+            uint8_t* data = nullptr;
+            size_t allocSize = entry.uncompressed_size + 1;
+            if (ESP.getFreeHeap() > allocSize + 32768) {
+                data = (uint8_t*)malloc(allocSize);
+            }
+            if (!data) {
+                data = (uint8_t*)ps_malloc(allocSize);
+            }
             if (!data) return nullptr;
             fread(data, 1, entry.uncompressed_size, _f);
             data[entry.uncompressed_size] = 0;
@@ -166,29 +174,64 @@ uint8_t* ZipReader::readFile(const char* name, size_t* outSize) {
             return data;
 
         } else if (entry.compression_method == 8) {
-            // DEFLATE — inflate using zlib
-            uint8_t* compressed = (uint8_t*)malloc(entry.compressed_size);
-            if (!compressed) return nullptr;
-            fread(compressed, 1, entry.compressed_size, _f);
+            // DEFLATE — inflate using zlib streaming with 2KB chunk buffer
+            const size_t BUF_SIZE = 2048;
+            uint8_t* inBuf = (uint8_t*)malloc(BUF_SIZE);
+            if (!inBuf) return nullptr;
 
-            uint8_t* data = (uint8_t*)ps_malloc(entry.uncompressed_size + 1);
-            if (!data) { free(compressed); return nullptr; }
+            // Prefer internal SRAM to avoid PSRAM cache corruption on ESP32-S3
+            uint8_t* data = nullptr;
+            size_t allocSize = entry.uncompressed_size + 1;
+            if (ESP.getFreeHeap() > allocSize + 32768) {
+                data = (uint8_t*)malloc(allocSize);
+            }
+            if (!data) {
+                data = (uint8_t*)ps_malloc(allocSize);
+            }
+            if (!data) { free(inBuf); return nullptr; }
 
             z_stream strm;
             memset(&strm, 0, sizeof(strm));
-            strm.next_in   = compressed;
-            strm.avail_in  = entry.compressed_size;
+            strm.next_in = nullptr;
+            strm.avail_in = 0;
             strm.next_out  = data;
             strm.avail_out = entry.uncompressed_size;
 
-            if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) {
-                free(compressed); free(data); return nullptr;
-            }
-            int ret = inflate(&strm, Z_FINISH);
-            inflateEnd(&strm);
-            free(compressed);
+            bool ok = inflateInit2(&strm, -MAX_WBITS) == Z_OK;
+            if (ok) {
+                uint32_t compressedRemaining = entry.compressed_size;
+                int ret = Z_OK;
+                while (true) {
+                    if (strm.avail_in == 0 && compressedRemaining > 0) {
+                        size_t want = compressedRemaining > BUF_SIZE ? BUF_SIZE : compressedRemaining;
+                        size_t n = fread(inBuf, 1, want, _f);
+                        if (n == 0) { ok = false; break; }
+                        strm.next_in = inBuf;
+                        strm.avail_in = n;
+                        compressedRemaining -= n;
+                    }
 
-            if (ret != Z_STREAM_END && ret != Z_OK) {
+                    ret = inflate(&strm, Z_NO_FLUSH);
+
+                    if (ret == Z_STREAM_END) break;
+
+                    if (ret != Z_OK) {
+                        if (ret == Z_BUF_ERROR && strm.avail_in == 0 && compressedRemaining == 0) {
+                            break; // Clean EOF
+                        }
+                        Serial.printf("ZIP: readFile inflate error %d\n", ret);
+                        ok = false;
+                        break;
+                    }
+                    yield();
+                }
+                inflateEnd(&strm);
+            } else {
+                ok = false;
+            }
+
+            free(inBuf);
+            if (!ok) {
                 free(data);
                 return nullptr;
             }
@@ -217,6 +260,8 @@ bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* out
         }
 
         bool ok = false;
+        uint32_t bytesWritten = 0;
+
         if (entry.compression_method == 0) {
             uint8_t buf[1024];
             uint32_t remaining = entry.uncompressed_size;
@@ -225,46 +270,70 @@ bool ZipReader::extractFileTo(const char* name, const char* outPath, size_t* out
                 size_t want = remaining > sizeof(buf) ? sizeof(buf) : remaining;
                 size_t n = fread(buf, 1, want, _f);
                 if (n != want || out.write(buf, n) != n) { ok = false; break; }
+                bytesWritten += n;
                 remaining -= n;
                 yield();
             }
         } else if (entry.compression_method == 8) {
-            uint8_t inBuf[1024];
-            uint8_t outBuf[1024];
-            z_stream strm;
-            memset(&strm, 0, sizeof(strm));
-            ok = inflateInit2(&strm, -MAX_WBITS) == Z_OK;
-            uint32_t compressedRemaining = entry.compressed_size;
+            // DEFLATE — inflate using zlib streaming with 2KB chunk buffer
+            const size_t BUF_SIZE = 2048;
+            uint8_t* inBuf = (uint8_t*)malloc(BUF_SIZE);
+            uint8_t* outBuf = (uint8_t*)malloc(BUF_SIZE);
+            if (inBuf && outBuf) {
+                z_stream strm;
+                memset(&strm, 0, sizeof(strm));
+                strm.next_in = nullptr;
+                strm.avail_in = 0;
 
-            while (ok) {
-                if (strm.avail_in == 0 && compressedRemaining > 0) {
-                    size_t want = compressedRemaining > sizeof(inBuf) ? sizeof(inBuf) : compressedRemaining;
-                    size_t n = fread(inBuf, 1, want, _f);
-                    if (n != want) { ok = false; break; }
-                    compressedRemaining -= n;
-                    strm.next_in = inBuf;
-                    strm.avail_in = n;
+                ok = inflateInit2(&strm, -MAX_WBITS) == Z_OK;
+                if (ok) {
+                    uint32_t compressedRemaining = entry.compressed_size;
+                    int ret = Z_OK;
+                    while (true) {
+                        if (strm.avail_in == 0 && compressedRemaining > 0) {
+                            size_t want = compressedRemaining > BUF_SIZE ? BUF_SIZE : compressedRemaining;
+                            size_t n = fread(inBuf, 1, want, _f);
+                            if (n == 0) { ok = false; break; }
+                            strm.next_in = inBuf;
+                            strm.avail_in = n;
+                            compressedRemaining -= n;
+                        }
+
+                        strm.next_out = outBuf;
+                        strm.avail_out = BUF_SIZE;
+                        ret = inflate(&strm, Z_NO_FLUSH);
+
+                        size_t produced = BUF_SIZE - strm.avail_out;
+                        if (produced > 0) {
+                            if (out.write(outBuf, produced) != produced) { ok = false; break; }
+                            bytesWritten += produced;
+                        }
+
+                        if (ret == Z_STREAM_END) break;
+
+                        if (ret != Z_OK) {
+                            if (ret == Z_BUF_ERROR && strm.avail_in == 0 && compressedRemaining == 0) {
+                                break; // Clean EOF
+                            }
+                            Serial.printf("ZIP: extractFileTo inflate error %d\n", ret);
+                            ok = false;
+                            break;
+                        }
+                        yield();
+                    }
+                    inflateEnd(&strm);
                 }
-
-                strm.next_out = outBuf;
-                strm.avail_out = sizeof(outBuf);
-                int ret = inflate(&strm, compressedRemaining == 0 ? Z_FINISH : Z_NO_FLUSH);
-                size_t produced = sizeof(outBuf) - strm.avail_out;
-                if (produced && out.write(outBuf, produced) != produced) { ok = false; break; }
-                if (ret == Z_STREAM_END) break;
-                if (ret != Z_OK) { ok = false; break; }
-                yield();
             }
-            inflateEnd(&strm);
+            if (inBuf) free(inBuf);
+            if (outBuf) free(outBuf);
         }
 
-        size_t finalSize = out.size();
         out.close();
-        if (!ok || finalSize != entry.uncompressed_size) {
+        if (!ok || bytesWritten == 0) {
             SD.remove(outPath);
             return false;
         }
-        if (outSize) *outSize = finalSize;
+        if (outSize) *outSize = bytesWritten;
         return true;
     }
     return false;
@@ -738,19 +807,28 @@ String EpubParser::getChapterText(int index) {
                   index, _spine[index].href.c_str(), (int)ESP.getFreeHeap());
     yield();
 
-    size_t size;
-    uint8_t* data = _zip.readFile(_spine[index].href.c_str(), &size);
-    if (!data) {
-        Serial.printf("EPUB: cannot read chapter %s\n", _spine[index].href.c_str());
+    if (!SD.exists("/books/.linecache")) SD.mkdir("/books/.linecache");
+    String tempPath = "/books/.linecache/temp_chapter.html";
+    size_t size = 0;
+    if (!_zip.extractFileTo(_spine[index].href.c_str(), tempPath.c_str(), &size)) {
+        Serial.printf("EPUB: cannot extract chapter %s to SD\n", _spine[index].href.c_str());
         return "";
     }
 
-    Serial.printf("EPUB: decompressed %d bytes, stripping HTML (heap: %d)\n",
+    Serial.printf("EPUB: extracted %d bytes to SD, stripping HTML (heap: %d)\n",
                   (int)size, (int)ESP.getFreeHeap());
     yield();
 
-    String text = stripHtml((const char*)data, size);
-    free(data);
+    File f = SD.open(tempPath, FILE_READ);
+    if (!f) {
+        Serial.println("EPUB: cannot open extracted chapter file");
+        SD.remove(tempPath);
+        return "";
+    }
+
+    String text = stripHtmlFromFile(f, size);
+    f.close();
+    SD.remove(tempPath);
 
     Serial.printf("EPUB: stripped to %d chars (heap: %d)\n",
                   (int)text.length(), (int)ESP.getFreeHeap());
@@ -1213,8 +1291,364 @@ String EpubParser::stripHtml(const char* html, size_t len) {
 
     // Decode all HTML entities (named + numeric, including UTF-8)
     result = decodeEntities(result);
+    result.replace("\xC2\xA0", " ");
+    result.replace("\xE2\x80\x98", "'");
+    result.replace("\xE2\x80\x99", "'");
+    result.replace("\xE2\x80\x9C", "\"");
+    result.replace("\xE2\x80\x9D", "\"");
+    result.replace("\xE2\x80\x93", "-");
+    result.replace("\xE2\x80\x94", " - ");
+    result.replace("\xE2\x80\xA6", "...");
 
     // Trim leading/trailing whitespace
     result.trim();
     return result;
+}
+
+String EpubParser::stripHtmlFromFile(fs::File& f, size_t len) {
+    String result;
+    result.reserve(len / 2);
+
+    bool inTag = false;
+    bool inScript = false;
+    bool inStyle = false;
+    bool collectingTag = false;
+    bool isImgTag = false;     // only buffer tag content for img/image tags
+    String tagName;
+    String tagContent;
+    unsigned long lastYieldMs = millis();
+
+    const size_t BUF_SIZE = 512;
+    uint8_t* buf = (uint8_t*)malloc(BUF_SIZE);
+    
+    if (buf) {
+        size_t totalRead = 0;
+        size_t byteIdx = 0;
+        while (totalRead < len) {
+            size_t want = len - totalRead;
+            if (want > BUF_SIZE) want = BUF_SIZE;
+            size_t n = f.read(buf, want);
+            if (n == 0) break;
+            totalRead += n;
+
+            for (size_t i = 0; i < n; i++) {
+                char c = (char)buf[i];
+                if (!c) continue;
+
+                // Yield periodically
+                if ((byteIdx & 0x3FF) == 0) {
+                    unsigned long nowMs = millis();
+                    if (nowMs - lastYieldMs >= 50) {
+                        yield();
+                        lastYieldMs = nowMs;
+                    }
+                }
+                byteIdx++;
+
+                if (c == '<') {
+                    inTag = true;
+                    tagName = "";
+                    tagContent = "";
+                    collectingTag = true;
+                    isImgTag = false;
+                    continue;
+                }
+
+                if (c == '>') {
+                    inTag = false;
+                    collectingTag = false;
+                    tagName.toLowerCase();
+
+                    if (tagName == "img" || tagName == "image") {
+                        String src;
+                        extractImageAttr(tagContent, src);
+                        if (src.length() > 0) {
+                            if (result.length() > 0 && result[result.length()-1] != '\n')
+                                result += '\n';
+                            result += '\x01';
+                            result += "IMG|";
+                            result += src;
+                            result += '\x01';
+                            result += '\n';
+                        }
+                    }
+
+                    if (tagName == "script") inScript = true;
+                    if (tagName == "/script") inScript = false;
+                    if (tagName == "style") inStyle = true;
+                    if (tagName == "/style") inStyle = false;
+
+                    if (isBlockTag(tagName)) {
+                        if (result.length() > 0 && result[result.length()-1] != '\n') {
+                            result += '\n';
+                        }
+                    }
+                    continue;
+                }
+
+                if (inTag) {
+                    if (collectingTag && c != ' ' && c != '/' && c != '\n' && c != '\r') {
+                        tagName += c;
+                    } else {
+                        if (collectingTag) {
+                            collectingTag = false;
+                            String lowerTag = tagName;
+                            lowerTag.toLowerCase();
+                            isImgTag = (lowerTag == "img" || lowerTag == "image");
+                        }
+                        if (isImgTag) {
+                            tagContent += c;
+                        }
+                    }
+                    continue;
+                }
+
+                if (inScript || inStyle) continue;
+
+                if (c == '\r') continue;
+                if (c == '\n' || c == '\t') c = ' ';
+                if (c == ' ' && result.length() > 0 && result[result.length()-1] == ' ') continue;
+
+                result += c;
+            }
+        }
+        free(buf);
+    }
+
+    result = decodeEntities(result);
+    result.replace("\xC2\xA0", " ");
+    result.replace("\xE2\x80\x98", "'");
+    result.replace("\xE2\x80\x99", "'");
+    result.replace("\xE2\x80\x9C", "\"");
+    result.replace("\xE2\x80\x9D", "\"");
+    result.replace("\xE2\x80\x93", "-");
+    result.replace("\xE2\x80\x94", " - ");
+    result.replace("\xE2\x80\xA6", "...");
+    result.trim();
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stripHtmlToFile — streaming HTML stripper: reads from SD file, writes
+// plain-text paragraphs to another SD file.  Never builds a large String.
+// ─────────────────────────────────────────────────────────────────────────────
+bool EpubParser::stripHtmlToFile(fs::File& in, size_t len, fs::File& out) {
+    const size_t IN_BUF = 512;
+    uint8_t* buf = (uint8_t*)malloc(IN_BUF);
+    if (!buf) return false;
+
+    // Current paragraph buffer — flushed on block tags or when too large
+    String para;
+    para.reserve(512);
+
+    bool inTag = false;
+    bool inScript = false;
+    bool inStyle = false;
+    bool collectingTag = false;
+    bool isImgTag = false;
+    String tagName;
+    String tagContent;
+    bool lastCharWasSpace = false;
+
+    unsigned long lastYieldMs = millis();
+    size_t totalRead = 0;
+    size_t byteIdx = 0;
+
+    auto flushPara = [&]() {
+        if (para.length() > 0) {
+            para.trim();
+            if (para.length() > 0) {
+                out.print(para);
+                out.print('\n');
+            }
+            para = "";
+        }
+        lastCharWasSpace = false;
+    };
+
+    while (totalRead < len) {
+        size_t want = len - totalRead;
+        if (want > IN_BUF) want = IN_BUF;
+        size_t n = in.read(buf, want);
+        if (n == 0) break;
+        totalRead += n;
+
+        for (size_t i = 0; i < n; i++) {
+            char c = (char)buf[i];
+            if (!c) continue;
+
+            if ((byteIdx & 0x3FF) == 0) {
+                unsigned long nowMs = millis();
+                if (nowMs - lastYieldMs >= 50) { yield(); lastYieldMs = nowMs; }
+            }
+            byteIdx++;
+
+            if (c == '<') {
+                inTag = true;
+                tagName = "";
+                tagContent = "";
+                collectingTag = true;
+                isImgTag = false;
+                continue;
+            }
+
+            if (c == '>') {
+                inTag = false;
+                collectingTag = false;
+                tagName.toLowerCase();
+
+                // Image tags — emit \x01IMG|path\x01 marker line
+                if (tagName == "img" || tagName == "image") {
+                    String src;
+                    extractImageAttr(tagContent, src);
+                    if (src.length() > 0) {
+                        flushPara();
+                        out.print('\x01');
+                        out.print("IMG|");
+                        out.print(src);
+                        out.print('\x01');
+                        out.print('\n');
+                    }
+                }
+
+                if (tagName == "script") inScript = true;
+                if (tagName == "/script") inScript = false;
+                if (tagName == "style") inStyle = true;
+                if (tagName == "/style") inStyle = false;
+
+                if (isBlockTag(tagName)) {
+                    flushPara();
+                }
+                continue;
+            }
+
+            if (inTag) {
+                if (collectingTag && c != ' ' && c != '/' && c != '\n' && c != '\r') {
+                    tagName += c;
+                } else {
+                    if (collectingTag) {
+                        collectingTag = false;
+                        String lt = tagName; lt.toLowerCase();
+                        isImgTag = (lt == "img" || lt == "image");
+                    }
+                    if (isImgTag) tagContent += c;
+                }
+                continue;
+            }
+
+            if (inScript || inStyle) continue;
+
+            if (c == '\r') continue;
+            if (c == '\n' || c == '\t') c = ' ';
+            if (c == ' ' && lastCharWasSpace) continue;
+
+            para += c;
+            lastCharWasSpace = (c == ' ');
+
+            // Safety flush: prevent single paragraph from consuming too much RAM
+            if (para.length() >= 2048) {
+                out.print(para);
+                para = "";
+                lastCharWasSpace = false;
+            }
+        }
+    }
+    free(buf);
+    flushPara();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getChapterTextToFile — extract chapter from EPUB, strip HTML, write plain
+// text directly to outPath on SD.  Returns true on success.
+// Never holds the entire chapter as a String in RAM.
+// ─────────────────────────────────────────────────────────────────────────────
+bool EpubParser::getChapterTextToFile(int index, const String& outPath) {
+    if (index < 0 || index >= (int)_spine.size()) return false;
+
+    Serial.printf("EPUB: streaming chapter %d (%s) -> %s (heap: %d)\n",
+                  index, _spine[index].href.c_str(), outPath.c_str(), (int)ESP.getFreeHeap());
+    yield();
+
+    if (!SD.exists("/books/.linecache")) SD.mkdir("/books/.linecache");
+    String tempPath = "/books/.linecache/temp_chapter.html";
+
+    // Step 1: decompress chapter HTML to a temp SD file (streaming, low RAM)
+    size_t htmlSize = 0;
+    if (!_zip.extractFileTo(_spine[index].href.c_str(), tempPath.c_str(), &htmlSize)) {
+        Serial.printf("EPUB: cannot extract chapter %s\n", _spine[index].href.c_str());
+        return false;
+    }
+    Serial.printf("EPUB: extracted %d bytes html (heap: %d)\n", (int)htmlSize, (int)ESP.getFreeHeap());
+    yield();
+
+    // Step 2: open temp file and strip HTML directly to outPath (no big String)
+    File inFile = SD.open(tempPath, FILE_READ);
+    if (!inFile) {
+        Serial.println("EPUB: cannot open temp html");
+        SD.remove(tempPath);
+        return false;
+    }
+    File outFile = SD.open(outPath, FILE_WRITE);
+    if (!outFile) {
+        inFile.close();
+        SD.remove(tempPath);
+        Serial.println("EPUB: cannot open output plain-text file");
+        return false;
+    }
+
+    bool ok = stripHtmlToFile(inFile, htmlSize, outFile);
+    inFile.close();
+    outFile.close();
+    SD.remove(tempPath);
+
+    if (!ok) {
+        SD.remove(outPath);
+        Serial.println("EPUB: stripHtmlToFile failed");
+        return false;
+    }
+
+    // Resolve image paths in-place: re-read the file and fix \x01IMG|...\x01 markers
+    // This step is lightweight — only IMG markers are affected.
+    // We do a second pass only if the chapter has a non-root base path.
+    String chapterBase;
+    {
+        String href = _spine[index].href;
+        int sl = href.lastIndexOf('/');
+        chapterBase = (sl >= 0) ? href.substring(0, sl + 1) : "";
+    }
+
+    if (chapterBase.length() > 0) {
+        // Rewrite IMG paths to absolute zip paths
+        String tmpFixed = "/books/.linecache/temp_fixed.txt";
+        File rIn = SD.open(outPath, FILE_READ);
+        File rOut = SD.open(tmpFixed, FILE_WRITE);
+        if (rIn && rOut) {
+            while (rIn.available()) {
+                String line = rIn.readStringUntil('\n');
+                if (line.length() > 5 && line[0] == '\x01' && line.substring(1, 5) == "IMG|") {
+                    String relPath = line.substring(5);
+                    // Remove trailing \x01 if present
+                    if (relPath.length() > 0 && relPath[relPath.length()-1] == '\x01')
+                        relPath = relPath.substring(0, relPath.length()-1);
+                    String absPath = resolveRelativePath(chapterBase, relPath);
+                    rOut.print('\x01');
+                    rOut.print("IMG|");
+                    rOut.print(absPath);
+                    rOut.print('\x01');
+                    rOut.print('\n');
+                } else {
+                    rOut.print(line);
+                    rOut.print('\n');
+                }
+            }
+        }
+        if (rIn) rIn.close();
+        if (rOut) rOut.close();
+        SD.remove(outPath);
+        SD.rename(tmpFixed, outPath);
+    }
+
+    Serial.printf("EPUB: plain text ready at %s (heap: %d)\n", outPath.c_str(), (int)ESP.getFreeHeap());
+    return true;
 }

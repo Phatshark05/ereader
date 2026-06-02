@@ -24,16 +24,32 @@ struct SleepDrawContext {
     int dstW = 0;
     int dstH = 0;
     uint16_t* pngLineBuffer = nullptr;
+    uint32_t pixelsPlotted = 0;
 };
 
 static SleepDrawContext* g_ctx = nullptr;
 
 static inline void plot_scaled(int sx, int sy, uint8_t gray4) {
     if (!g_ctx || g_ctx->srcW <= 0 || g_ctx->srcH <= 0) return;
-    int dx = g_ctx->dstX + (sx * g_ctx->dstW) / g_ctx->srcW;
-    int dy = g_ctx->dstY + (sy * g_ctx->dstH) / g_ctx->srcH;
-    if (dx < 0 || dy < 0 || dx >= display_width() || dy >= display_height()) return;
-    display_draw_pixel(dx, dy, gray4);
+    
+    int dx1 = g_ctx->dstX + (sx * g_ctx->dstW) / g_ctx->srcW;
+    int dx2 = g_ctx->dstX + ((sx + 1) * g_ctx->dstW) / g_ctx->srcW;
+    int dy1 = g_ctx->dstY + (sy * g_ctx->dstH) / g_ctx->srcH;
+    int dy2 = g_ctx->dstY + ((sy + 1) * g_ctx->dstH) / g_ctx->srcH;
+
+    int startX = dx1;
+    int endX = std::max(dx1 + 1, dx2);
+    int startY = dy1;
+    int endY = std::max(dy1 + 1, dy2);
+
+    for (int y = startY; y < endY; ++y) {
+        for (int x = startX; x < endX; ++x) {
+            if (x >= 0 && y >= 0 && x < display_width() && y < display_height()) {
+                display_draw_pixel(x, y, gray4);
+            }
+        }
+    }
+    g_ctx->pixelsPlotted++;
 }
 
 static int jpegDrawCallback(JPEGDRAW* pDraw) {
@@ -214,12 +230,14 @@ static bool render_image_file(const String& path, File& file, size_t size) {
         ctx.dstH = std::max(1, drawH);
         ctx.dstX = (display_width() - ctx.dstW) / 2;
         ctx.dstY = (display_height() - ctx.dstH) / 2;
+        Serial.printf("Sleep JPEG: src=%dx%d dst=%dx%d at (%d,%d)\n",
+                      ctx.srcW, ctx.srcH, ctx.dstW, ctx.dstH, ctx.dstX, ctx.dstY);
 
         g_ctx = &ctx;
         ok = g_jpeg.decode(0, 0, 0) == 1;
         g_ctx = nullptr;
-        Serial.printf("Sleep JPEG: decode %s for %s (err=%d)\n",
-                      ok ? "OK" : "FAILED", path.c_str(), g_jpeg.getLastError());
+        Serial.printf("Sleep JPEG: decode %s for %s (err=%d, pixels=%u)\n",
+                      ok ? "OK" : "FAILED", path.c_str(), g_jpeg.getLastError(), ctx.pixelsPlotted);
         g_jpeg.close();
     } else {
         if (g_png.openRAM(fileBuffer, (int)size, pngDrawCallback) != PNG_SUCCESS) {
@@ -251,6 +269,8 @@ static bool render_image_file(const String& path, File& file, size_t size) {
         ctx.dstH = std::max(1, drawH);
         ctx.dstX = (display_width() - ctx.dstW) / 2;
         ctx.dstY = (display_height() - ctx.dstH) / 2;
+        Serial.printf("Sleep PNG: src=%dx%d dst=%dx%d at (%d,%d)\n",
+                      ctx.srcW, ctx.srcH, ctx.dstW, ctx.dstH, ctx.dstX, ctx.dstY);
 
         ctx.pngLineBuffer = (uint16_t*)ps_malloc(w * sizeof(uint16_t));
         if (!ctx.pngLineBuffer) {
@@ -264,8 +284,8 @@ static bool render_image_file(const String& path, File& file, size_t size) {
         g_ctx = &ctx;
         ok = g_png.decode(nullptr, 0) == PNG_SUCCESS;
         g_ctx = nullptr;
-        Serial.printf("Sleep PNG: decode %s for %s (err=%d)\n",
-                      ok ? "OK" : "FAILED", path.c_str(), g_png.getLastError());
+        Serial.printf("Sleep PNG: decode %s for %s (err=%d, pixels=%u)\n",
+                      ok ? "OK" : "FAILED", path.c_str(), g_png.getLastError(), ctx.pixelsPlotted);
         free(ctx.pngLineBuffer);
         ctx.pngLineBuffer = nullptr;
         g_png.close();

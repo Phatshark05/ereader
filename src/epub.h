@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <vector>
+#include <FS.h>
+
 
 // Lightweight ZIP reader using ESP-IDF built-in zlib
 struct ZipEntry {
@@ -57,6 +59,7 @@ public:
     const String& getAuthor() const { return _author; }
     int getChapterCount() const { return _spine.size(); }
     String getChapterText(int index);
+    bool getChapterTextToFile(int index, const String& outPath);
     String getChapterHtml(int index);
     String getChapterTitle(int index);
     int getTocCount() const { return _toc.size(); }
@@ -93,5 +96,7 @@ private:
     void buildSpineFallbackToc();
     int findSpineIndexForHref(const String& href) const;
     String stripHtml(const char* html, size_t len);
+    String stripHtmlFromFile(fs::File& f, size_t len);
+    bool stripHtmlToFile(fs::File& in, size_t len, fs::File& out);
     String resolveRelativePath(const String& base, const String& relative) const;
 };
