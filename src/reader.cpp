@@ -388,11 +388,6 @@ void BookReader::wrapTextToFile(const String& text) {
     }
 
     String workingText = text;
-    if ((int)workingText.length() > MAX_WRAP_TEXT_CHARS) {
-        workingText = workingText.substring(0, MAX_WRAP_TEXT_CHARS);
-        workingText += "\n\n[Section truncated for device stability]";
-    }
-
     int textLen = workingText.length();
     if (textLen == 0) { f.close(); return; }
 
@@ -537,22 +532,13 @@ void BookReader::wrapTextFromFile(const String& srcPath) {
     int spaceWidth  = display_text_width(" ");
     int indentWidth = spaceWidth * 3;
     unsigned long lastYieldMs = millis();
-    int totalCharsProcessed = 0;
 
     while (src.available()) {
         if (millis() - lastYieldMs >= 50) { yield(); lastYieldMs = millis(); }
 
         String paragraph = src.readStringUntil('\n');
         paragraph.trim();
-        totalCharsProcessed += paragraph.length();
 
-        // Safety limit: stop if we have processed an enormous amount
-        if (totalCharsProcessed > MAX_WRAP_TEXT_CHARS) {
-            writeLine(f, _lineOffsets, "");
-            writeLine(f, _lineOffsets, "[Section truncated for device stability]");
-            _totalLines += 2;
-            break;
-        }
 
         if (paragraph.length() == 0) {
             writeLine(f, _lineOffsets, "");
